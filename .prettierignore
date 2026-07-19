@@ -1,0 +1,8 @@
+node_modules
+dist
+data
+coverage
+.pytest_cache
+package-lock.json
+*.splat
+*.ply

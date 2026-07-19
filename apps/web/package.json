@@ -1,0 +1,32 @@
+{
+  "name": "@structurefirst/web",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 0.0.0.0",
+    "build": "tsc -b && vite build",
+    "check": "tsc -b --pretty false",
+    "test": "vitest run --passWithNoTests",
+    "preview": "vite preview --host 0.0.0.0"
+  },
+  "dependencies": {
+    "@sparkjsdev/spark": "2.1.0",
+    "@structurefirst/contracts": "0.1.0",
+    "lucide-react": "1.24.0",
+    "maplibre-gl": "5.24.0",
+    "react": "19.2.7",
+    "react-dom": "19.2.7",
+    "react-router-dom": "7.18.1",
+    "three": "0.185.1"
+  },
+  "devDependencies": {
+    "@types/react": "19.2.17",
+    "@types/react-dom": "19.2.3",
+    "@types/three": "0.185.1",
+    "@vitejs/plugin-react": "6.0.3",
+    "typescript": "7.0.2",
+    "vite": "8.1.5",
+    "vitest": "4.1.10"
+  }
+}

@@ -1,0 +1,26 @@
+node_modules/
+dist/
+.vite/
+coverage/
+playwright-report/
+test-results/
+.env
+.env.local
+*.log
+tmp/
+
+# StructureFirst case data is operational and must never be committed.
+data/
+.structurefirst-data/
+
+# Python worker environments and caches.
+.venv/
+__pycache__/
+.pytest_cache/
+*.py[cod]
+
+# Local editor and OS files.
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db

@@ -1,0 +1,27 @@
+{
+  "name": "structurefirst",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Autonomous emergency structure intelligence for pre-arrival tactical briefing.",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "npm run build -w @structurefirst/contracts && concurrently -k -n server,web -c blue,green \"npm run dev -w @structurefirst/server\" \"npm run dev -w @structurefirst/web\"",
+    "dev:full": "npm run build -w @structurefirst/contracts && concurrently -k -n worker,server,web -c magenta,blue,green \"npm run worker\" \"npm run dev -w @structurefirst/server\" \"npm run dev -w @structurefirst/web\"",
+    "worker": "python -m uvicorn app:app --app-dir services/reconstruction --host 127.0.0.1 --port 8010",
+    "build": "npm run build -w @structurefirst/contracts && npm run build -w @structurefirst/server && npm run build -w @structurefirst/web",
+    "check": "npm run check -w @structurefirst/contracts && npm run check -w @structurefirst/server && npm run check -w @structurefirst/web",
+    "test": "npm run test -w @structurefirst/server && npm run test -w @structurefirst/web",
+    "format": "prettier --write .",
+    "format:check": "prettier --check ."
+  },
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "devDependencies": {
+    "concurrently": "10.0.3",
+    "prettier": "3.9.5"
+  }
+}
