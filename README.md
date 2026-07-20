@@ -137,13 +137,48 @@ npm.cmd run build
 python -m pytest services/reconstruction
 ```
 
+## Local browser agent (optional)
+
+StructureFirst can drive a **visible** local Chrome or Edge with your
+configured AI provider acting as the operator. When enabled under
+**Settings > Local browser agent**, pressing "Search" launches a headed
+browser, sends each step's screenshot plus a short list of interactive
+elements to the model, and executes one JSON action per turn (`goto`,
+`type`, `click`, `scroll`, `collect_image`, `done`, ...).
+
+Requirements: a vision-capable model on the active AI provider, Chrome or
+Edge installed locally (or `STRUCTUREFIRST_BROWSER_EXECUTABLE` pointing at
+one), and a step budget between 4 and 60.
+
+Every image the agent collects is downloaded into the case directory and
+recorded with:
+
+- `rights: "restricted"` and `redistributable: false`
+- provenance tags `automated-discovery`, `browser-agent`, `local-only`,
+  `not-redistributable`
+- the original page URL kept as `originUrl` and the direct image URL as
+  `downloadUrl`
+- a SHA-256 hash and the exact byte size
+
+These files stay on the machine that ran the agent, feed only the local
+LucidFrame reconstruction, and must not be exported or shared. If reuse is
+needed, replace the agent-collected image with an operator upload or a
+result from an open-license source (KartaView, Wikimedia, Openverse).
+
 ## Source and model boundaries
 
-- Unknown-rights web and real-estate results remain links to the original site.
-  StructureFirst does not crawl Zillow or Redfin or copy their listing media.
-- Only modification-safe public-domain and Creative Commons images enter
-  local storage. Automatic reconstruction additionally requires exact address
-  text support or an operator-supplied case assignment.
+- Unknown-rights web and real-estate results remain links to the original site
+  by default. StructureFirst's automatic collectors (KartaView, Wikimedia,
+  Openverse, keyless Bing) do not crawl Zillow or Redfin or copy their listing
+  media.
+- The optional local browser agent may download restricted images for
+  local-only reconstruction. Those files are flagged `rights: "restricted"`,
+  `redistributable: false`, and stay on the machine that captured them. Export
+  and sharing paths must honor those flags.
+- Only modification-safe public-domain and Creative Commons images are
+  eligible for redistribution or reuse outside this machine. Automatic
+  reconstruction additionally requires exact address text support or an
+  operator-supplied case assignment.
 - StructureFirst passes the unchanged saved image file to LucidFrame. Apple
   SHARP performs its required decode and 1536 x 1536 model preprocessing inside
   the reconstruction engine.

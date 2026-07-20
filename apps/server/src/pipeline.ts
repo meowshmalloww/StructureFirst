@@ -268,6 +268,7 @@ export class CasePipeline {
           includeOpenverse: true,
           includeBrowser: true,
           includeBrave: true,
+          includeBrowserAgent: false,
         });
         discoveredCount = result.added;
         this.setStage(

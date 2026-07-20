@@ -23,11 +23,14 @@ export async function discoverWithBrowser(
   address: string,
   config: AppConfig,
   alternatives: string[] = [],
+  preferredExecutablePath?: string,
 ): Promise<BrowserResult[]> {
-  const executablePath = findBrowser(config);
+  const executablePath = findBrowser(
+    preferredExecutablePath ?? config.browserExecutablePath,
+  );
   if (!executablePath)
     throw new Error(
-      "Chrome or Edge was not found. Set STRUCTUREFIRST_BROWSER_EXECUTABLE in .env.",
+      "Chrome or Edge was not found. Enter the path under Settings > Local browser agent, or set STRUCTUREFIRST_BROWSER_EXECUTABLE in .env.",
     );
   const { chromium } = await import("playwright-core");
   const browser = await chromium.launch({ executablePath, headless: true });
@@ -266,9 +269,9 @@ function normalizedAddressTerms(value: string): {
   };
 }
 
-function findBrowser(config: AppConfig): string | undefined {
+function findBrowser(preferred: string | undefined): string | undefined {
   const candidates = [
-    config.browserExecutablePath,
+    preferred,
     "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
     "C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe",
     "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe",

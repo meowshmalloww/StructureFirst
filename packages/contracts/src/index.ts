@@ -359,6 +359,9 @@ export type AiProviderTestResult = z.infer<typeof AiProviderTestResultSchema>;
 export const DiscoverySettingsSchema = z.object({
   openverseEnabled: z.boolean(),
   browserEnabled: z.boolean(),
+  browserAgentEnabled: z.boolean(),
+  browserAgentMaxSteps: z.number().int().min(4).max(60),
+  browserExecutablePath: z.string().max(1000).optional(),
   braveConfigured: z.boolean(),
   braveKeyHint: z.string().max(32).optional(),
   updatedAt: IsoDateSchema.optional(),
@@ -368,6 +371,10 @@ export type DiscoverySettings = z.infer<typeof DiscoverySettingsSchema>;
 export const SaveDiscoverySettingsInputSchema = z.object({
   openverseEnabled: z.boolean(),
   browserEnabled: z.boolean(),
+  browserAgentEnabled: z.boolean().default(false),
+  browserAgentMaxSteps: z.number().int().min(4).max(60).default(20),
+  browserExecutablePath: z.string().trim().max(1000).optional(),
+  clearBrowserExecutablePath: z.boolean().default(false),
   braveApiKey: z.string().trim().max(4000).optional(),
   clearBraveKey: z.boolean().default(false),
 });
@@ -576,6 +583,7 @@ export const DiscoveryRunInputSchema = z.object({
   includeOpenverse: z.boolean().default(true),
   includeBrowser: z.boolean().default(true),
   includeBrave: z.boolean().default(true),
+  includeBrowserAgent: z.boolean().default(false),
 });
 export type DiscoveryRunInput = z.infer<typeof DiscoveryRunInputSchema>;
 

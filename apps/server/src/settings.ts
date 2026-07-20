@@ -1,5 +1,5 @@
 import { createCipheriv, createDecipheriv, randomBytes } from "node:crypto";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import {
   AiProviderIdSchema,
@@ -36,6 +36,9 @@ type StoredProvider = {
 type StoredDiscovery = {
   openverseEnabled: boolean;
   browserEnabled: boolean;
+  browserAgentEnabled?: boolean;
+  browserAgentMaxSteps?: number;
+  browserExecutablePath?: string;
   encryptedBraveKey?: string;
   updatedAt: string;
 };
@@ -192,9 +195,14 @@ export class SettingsService {
     const storedKey = stored?.encryptedBraveKey
       ? this.vault.decrypt(stored.encryptedBraveKey)
       : undefined;
+    const effectivePath =
+      stored?.browserExecutablePath ?? this.config.browserExecutablePath;
     const discovery = DiscoverySettingsSchema.parse({
       openverseEnabled: stored?.openverseEnabled ?? true,
       browserEnabled: stored?.browserEnabled ?? true,
+      browserAgentEnabled: stored?.browserAgentEnabled ?? false,
+      browserAgentMaxSteps: stored?.browserAgentMaxSteps ?? 20,
+      ...(effectivePath ? { browserExecutablePath: effectivePath } : {}),
       braveConfigured: Boolean(storedKey ?? envKey),
       ...((storedKey ?? envKey)
         ? { braveKeyHint: keyHint(storedKey ?? envKey ?? "") }
@@ -243,9 +251,18 @@ export class SettingsService {
       : braveKey
         ? this.vault.encrypt(braveKey)
         : previous?.encryptedBraveKey;
+    const rawPath = input.browserExecutablePath?.trim();
+    const browserExecutablePath = input.clearBrowserExecutablePath
+      ? undefined
+      : rawPath
+        ? this.validateBrowserExecutable(rawPath)
+        : previous?.browserExecutablePath;
     const stored: StoredDiscovery = {
       openverseEnabled: input.openverseEnabled,
       browserEnabled: input.browserEnabled,
+      browserAgentEnabled: input.browserAgentEnabled,
+      browserAgentMaxSteps: input.browserAgentMaxSteps,
+      ...(browserExecutablePath ? { browserExecutablePath } : {}),
       ...(encryptedBraveKey ? { encryptedBraveKey } : {}),
       updatedAt: nowIso(),
     };
@@ -462,6 +479,9 @@ export class SettingsService {
   discoveryOptions(): {
     openverseEnabled: boolean;
     browserEnabled: boolean;
+    browserAgentEnabled: boolean;
+    browserAgentMaxSteps: number;
+    browserExecutablePath?: string;
     braveApiKey?: string;
   } {
     const stored = this.store.getSetting<StoredDiscovery>("discovery");
@@ -469,11 +489,37 @@ export class SettingsService {
     const braveApiKey = encrypted
       ? this.vault.decrypt(encrypted)
       : this.config.braveApiKey;
+    const browserExecutablePath =
+      stored?.browserExecutablePath ?? this.config.browserExecutablePath;
     return {
       openverseEnabled: stored?.openverseEnabled ?? true,
       browserEnabled: stored?.browserEnabled ?? true,
+      browserAgentEnabled: stored?.browserAgentEnabled ?? false,
+      browserAgentMaxSteps: stored?.browserAgentMaxSteps ?? 20,
+      ...(browserExecutablePath ? { browserExecutablePath } : {}),
       ...(braveApiKey ? { braveApiKey } : {}),
     };
+  }
+
+  private validateBrowserExecutable(path: string): string {
+    if (!existsSync(path)) {
+      throw new Error(
+        `Chrome/Edge executable not found at ${path}. Enter a valid path to chrome.exe or msedge.exe.`,
+      );
+    }
+    const lower = path.toLowerCase();
+    if (
+      !lower.endsWith("chrome.exe") &&
+      !lower.endsWith("msedge.exe") &&
+      !lower.endsWith("chrome") &&
+      !lower.endsWith("chromium") &&
+      !lower.endsWith("chromium-browser")
+    ) {
+      throw new Error(
+        "Browser executable must be chrome.exe, msedge.exe, chrome, chromium, or chromium-browser.",
+      );
+    }
+    return path;
   }
 
   headers(credential: ProviderCredential): Record<string, string> {

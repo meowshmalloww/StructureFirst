@@ -16,6 +16,10 @@ import { confidence } from "./lib/confidence.js";
 import { createId, nowIso } from "./lib/ids.js";
 import { classifySource } from "./lib/source-policy.js";
 import { addressTextMatch, discoverWithBrowser } from "./providers/browser.js";
+import {
+  runBrowserAgent,
+  type BrowserAgentCandidate,
+} from "./providers/browser-agent.js";
 import { discoverBuildingEvidence } from "./providers/brave.js";
 import { discoverKartaViewImages } from "./providers/kartaview.js";
 import { discoverOpenverseImages } from "./providers/openverse.js";
@@ -276,12 +280,53 @@ export class EvidenceDiscoveryCoordinator {
       }
     }
 
+    if (input.includeBrowserAgent && options.browserAgentEnabled) {
+      try {
+        const agentResult = await runBrowserAgent(
+          {
+            address: queryAddress,
+            alternatives: queryAlternatives,
+            maxSteps: options.browserAgentMaxSteps,
+          },
+          this.settings,
+          this.config,
+        );
+        providers.push("Browser agent");
+        for (const candidate of agentResult.candidates) {
+          if (existingUrls.has(candidate.imageUrl)) continue;
+          try {
+            const evidence = await this.importAgentImage(
+              caseId,
+              candidate,
+              queryAddress,
+            );
+            this.store.putEvidence(evidence);
+            existingUrls.add(candidate.imageUrl);
+            added += 1;
+            imported += 1;
+          } catch (error) {
+            warnings.push(
+              `Browser agent: ${candidate.title} - ${errorMessage(error)}`,
+            );
+          }
+        }
+        if (agentResult.reason !== "done") {
+          warnings.push(
+            `Browser agent stopped early (${agentResult.reason}) after ${agentResult.steps} step(s).`,
+          );
+        }
+      } catch (error) {
+        warnings.push(`Browser agent: ${errorMessage(error)}`);
+      }
+    }
+
     if (input.includeBrowser && options.browserEnabled) {
       try {
         const links = await discoverWithBrowser(
           queryAddress,
           this.config,
           queryAlternatives,
+          options.browserExecutablePath,
         );
         providers.push("Browser search");
         for (const link of links) {
@@ -374,6 +419,82 @@ export class EvidenceDiscoveryCoordinator {
         1,
       ),
     });
+  }
+
+  // The browser agent visits pages whose imagery has no established reuse
+  // license. Bytes are pulled solely for local StructureFirst reconstruction:
+  // the resulting EvidenceAsset is marked rights=restricted, redistributable
+  // is false, and Rescue View export paths must honor that. The saved copy
+  // stays inside the case directory next to operator uploads.
+  private async importAgentImage(
+    caseId: string,
+    candidate: BrowserAgentCandidate,
+    queryAddress: string,
+  ): Promise<EvidenceAsset> {
+    const response = await safeRemoteFetch(candidate.imageUrl);
+    const mimeType = (response.headers.get("content-type") ?? "")
+      .split(";", 1)[0]
+      ?.trim()
+      .toLowerCase();
+    const extension = mimeType ? MIME_EXTENSIONS[mimeType] : undefined;
+    if (!mimeType || !extension)
+      throw new Error("The agent-collected asset is not a JPEG, PNG, or WebP.");
+    const bytes = await limitedBytes(response, MAX_REMOTE_IMAGE_BYTES);
+    if (!matchesMagic(bytes, mimeType))
+      throw new Error(
+        "The agent-collected file signature does not match its image type.",
+      );
+
+    const uploadId = createId("agent");
+    const directory = resolve(this.config.casesRoot, caseId, "uploads");
+    mkdirSync(directory, { recursive: true });
+    const name = `${uploadId}${extension}`;
+    const outputPath = resolve(directory, name);
+    writeFileSync(outputPath, bytes, { flag: "wx" });
+
+    const sourceHost = safeHostname(candidate.sourceUrl);
+    const addressMatched = addressTextMatch(
+      queryAddress,
+      candidate.title,
+      candidate.sourceUrl,
+      candidate.why,
+    );
+
+    return {
+      id: createId("evidence"),
+      caseId,
+      title: candidate.title,
+      kind: "image",
+      sourceProvider: `Browser agent · ${sourceHost}`,
+      originUrl: candidate.sourceUrl,
+      downloadUrl: candidate.imageUrl,
+      discoveredAt: nowIso(),
+      rights: "restricted",
+      cachePolicy: "local_allowed",
+      redistributable: false,
+      validation: "automated_imported",
+      localUrl: `/assets/${caseId}/uploads/${name}`,
+      mimeType,
+      byteSize: bytes.byteLength,
+      sha256: createHash("sha256").update(bytes).digest("hex"),
+      tags: [
+        "automated-discovery",
+        "browser-agent",
+        "local-only",
+        "not-redistributable",
+        ...(addressMatched
+          ? ["address-text-match"]
+          : ["address-relevance-unverified"]),
+      ],
+      notes: `Collected by the local browser agent from ${sourceHost}. Agent rationale: ${candidate.why}. Rights status is restricted: the file is kept only for local StructureFirst reconstruction and must not be redistributed. Address relevance still requires visual confirmation.`,
+      confidence: confidence(
+        addressMatched ? 0.4 : 0.28,
+        "estimated",
+        "inferred",
+        "Browser-agent capture; visual match to the target address requires operator confirmation.",
+        1,
+      ),
+    };
   }
 }
 
@@ -545,4 +666,12 @@ function discoveryQueries(caseValue: Case): string[] {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : "Unknown discovery error";
+}
+
+function safeHostname(rawUrl: string): string {
+  try {
+    return new URL(rawUrl).hostname.replace(/^www\./, "");
+  } catch {
+    return "external source";
+  }
 }

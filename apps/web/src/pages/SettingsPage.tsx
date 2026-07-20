@@ -583,11 +583,22 @@ function SearchSettings({
     const form = event.currentTarget;
     const values = new FormData(form);
     const enabled = values.get("automatic") === "on";
+    const agentEnabled = values.get("browserAgent") === "on";
+    const rawSteps = Number(values.get("browserAgentSteps") ?? 20);
+    const agentSteps = Number.isFinite(rawSteps)
+      ? Math.min(60, Math.max(4, Math.round(rawSteps)))
+      : 20;
+    const chromePath = String(values.get("chromePath") ?? "").trim();
+    const clearChromePath = values.get("clearChromePath") === "on";
     const key = String(values.get("braveApiKey") ?? "").trim();
     try {
       const saved = await api.saveDiscovery({
         openverseEnabled: enabled,
         browserEnabled: enabled,
+        browserAgentEnabled: agentEnabled,
+        browserAgentMaxSteps: agentSteps,
+        ...(chromePath ? { browserExecutablePath: chromePath } : {}),
+        clearBrowserExecutablePath: clearChromePath,
         ...(key ? { braveApiKey: key } : {}),
         clearBraveKey: values.get("clearBraveKey") === "on",
       });
@@ -627,6 +638,69 @@ function SearchSettings({
           </small>
         </span>
       </label>
+
+      <details className="optional-search-key">
+        <summary>
+          Local browser agent (LLM-driven, restricted-local capture)
+        </summary>
+        <p>
+          Launches a visible Chrome or Edge and lets your configured AI
+          provider drive the mouse and keyboard to visit real-estate and
+          municipal pages, then downloads matching photos to this machine
+          only. Downloaded images are marked <strong>rights: restricted</strong>,
+          <strong> redistributable: false</strong>. They power local
+          reconstruction only and must not be shared. Requires a vision-capable
+          AI model in Settings above.
+        </p>
+        <label className="search-toggle-row">
+          <input
+            name="browserAgent"
+            type="checkbox"
+            defaultChecked={settings.discovery.browserAgentEnabled}
+          />
+          <span>
+            <strong>Enable local browser agent</strong>
+            <small>
+              Off by default. When on, the agent runs whenever you press
+              "Search". Watch the browser window; the agent stops on your
+              step budget below.
+            </small>
+          </span>
+        </label>
+        <label>
+          Step budget (4-60)
+          <input
+            name="browserAgentSteps"
+            type="number"
+            min={4}
+            max={60}
+            defaultValue={settings.discovery.browserAgentMaxSteps}
+          />
+        </label>
+        <label>
+          Chrome or Edge executable path
+          <input
+            name="chromePath"
+            type="text"
+            autoComplete="off"
+            spellCheck={false}
+            placeholder={
+              settings.discovery.browserExecutablePath ??
+              "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe"
+            }
+          />
+          <small>
+            Leave blank to keep the current path. The server verifies the file
+            exists before saving.
+          </small>
+        </label>
+        {settings.discovery.browserExecutablePath ? (
+          <label className="plain-check">
+            <input name="clearChromePath" type="checkbox" /> Remove saved
+            browser path (fall back to auto-detect / env)
+          </label>
+        ) : null}
+      </details>
 
       <details className="optional-search-key">
         <summary>Optional Brave Search connection</summary>

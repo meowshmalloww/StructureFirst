@@ -134,6 +134,7 @@ export function CasePage() {
         includeOpenverse: true,
         includeBrowser: true,
         includeBrave: true,
+        includeBrowserAgent: true,
       });
       const detail = result.imported
         ? `${result.imported} reusable ${result.imported === 1 ? "photo" : "photos"} imported`
