@@ -1,0 +1,42 @@
+{
+  "schemaVersion": 1,
+  "datasetId": "eth3d-lounge-secondary-four-view",
+  "component": "lounge-secondary",
+  "passed": true,
+  "checks": {
+    "inputHashes": true,
+    "registrationRecall": true,
+    "registrationPrecision": true,
+    "jointCameraAccepted": true,
+    "poseGraphImproved": true,
+    "pointOptimization": true,
+    "pointRmse": true,
+    "overlapColorImproved": true,
+    "overlapColorSamples": true,
+    "scaleCountPreserved": true,
+    "splatSize": true
+  },
+  "metrics": {
+    "registeredFrames": 4,
+    "frameCount": 4,
+    "gaussianCount": 4692223,
+    "splatBytes": 150151136,
+    "rotationAgreementMedianDegrees": 5.0926,
+    "poseGraphBeforeRmse": 0.2170004,
+    "poseGraphAfterRmse": 0.1532958,
+    "pointConstraintCount": 2345,
+    "pointBeforeRmseMeters": 0.2681613,
+    "pointAfterRmseMeters": 0.2481378,
+    "overlapColorSamples": 2272,
+    "overlapColorBeforeRmse": 0.2090309,
+    "overlapColorAfterRmse": 0.097614,
+    "scaleAdjustedGaussians": 1,
+    "scaleDeletedGaussians": 0,
+    "gpu": "NVIDIA GeForce RTX 4080 Laptop GPU",
+    "peakVramMb": 6133.3
+  },
+  "limitations": [
+    "This component has no verified transform to the primary lounge component.",
+    "Observed visual geometry does not establish unseen surfaces or a safe route."
+  ]
+}

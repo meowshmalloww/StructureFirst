@@ -26,6 +26,7 @@ from typing import Any, Callable, Literal
 from fastapi import FastAPI, HTTPException, status
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from dotenv import load_dotenv
+from detector import detect_data_url, detector_status
 
 LOGGER = logging.getLogger("structurefirst.reconstruction")
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
@@ -72,10 +73,11 @@ class JobRequest(BaseModel):
     evidence_id: str
     input_path: str = Field(min_length=1, max_length=4096)
     input_sha256: str = Field(min_length=64, max_length=64)
-    evidence_ids: list[str] | None = Field(default=None, min_length=2, max_length=12)
-    input_paths: list[str] | None = Field(default=None, min_length=2, max_length=12)
-    input_sha256s: list[str] | None = Field(default=None, min_length=2, max_length=12)
-    mode: Literal["single_image", "panorama", "multi_image"] = "single_image"
+    evidence_ids: list[str] | None = Field(default=None, min_length=1, max_length=12)
+    input_paths: list[str] | None = Field(default=None, min_length=1, max_length=12)
+    input_sha256s: list[str] | None = Field(default=None, min_length=1, max_length=12)
+    floor_numbers: list[int] | None = Field(default=None, min_length=1, max_length=12)
+    mode: Literal["single_image", "panorama", "multi_image", "floorplan"] = "single_image"
 
     @field_validator("job_id", "case_id", "evidence_id")
     @classmethod
@@ -111,10 +113,10 @@ class JobRequest(BaseModel):
 
     @model_validator(mode="after")
     def validate_multi_input(self) -> "JobRequest":
-        if self.mode == "multi_image":
+        if self.mode in {"multi_image", "floorplan"}:
             if not self.input_paths or not self.evidence_ids or not self.input_sha256s:
                 raise ValueError(
-                    "multi-image jobs require input_paths, input_sha256s, and evidence_ids"
+                    "grouped jobs require input_paths, input_sha256s, and evidence_ids"
                 )
             if not (
                 len(self.input_paths)
@@ -122,12 +124,19 @@ class JobRequest(BaseModel):
                 == len(self.input_sha256s)
             ):
                 raise ValueError(
-                    "multi-image path, hash, and evidence counts must match"
+                    "grouped path, hash, and evidence counts must match"
                 )
+            if self.mode == "multi_image" and len(self.input_paths) < 2:
+                raise ValueError("multi-image jobs require at least two inputs")
+            if self.mode == "floorplan" and (
+                not self.floor_numbers
+                or len(self.floor_numbers) != len(self.input_paths)
+            ):
+                raise ValueError("floorplan jobs require one floor number per plan")
             if self.input_sha256 != self.input_sha256s[0]:
                 raise ValueError("input_sha256 must match the first multi-image hash")
         elif self.input_sha256s is not None:
-            raise ValueError("input_sha256s is only valid for multi-image jobs")
+            raise ValueError("input_sha256s is only valid for grouped jobs")
         return self
 
 
@@ -153,10 +162,11 @@ class JobState(BaseModel):
     case_id: str
     evidence_id: str
     status: Literal["queued", "running", "ready", "failed"]
-    mode: Literal["single_image", "panorama", "multi_image"]
+    mode: Literal["single_image", "panorama", "multi_image", "floorplan"]
     created_at: str
     updated_at: str
     splat_url: str | None = None
+    structural_model_url: str | None = None
     manifest_url: str | None = None
     gaussian_count: int | None = None
     registration_report_url: str | None = None
@@ -167,6 +177,13 @@ class JobState(BaseModel):
     fallback_used: bool = False
     fallback_reason: str | None = None
     error: str | None = None
+
+
+class DetectionFrameRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    image_data_url: str = Field(min_length=32, max_length=2_800_000)
+    score_threshold: float = Field(default=0.34, ge=0.1, le=0.9)
 
 
 app = FastAPI(
@@ -199,7 +216,7 @@ def _validated_input(request: JobRequest) -> Path:
 def _validated_inputs(
     request: JobRequest,
 ) -> tuple[list[Path], list[InputFingerprint]]:
-    if request.mode != "multi_image":
+    if request.mode not in {"multi_image", "floorplan"}:
         paths = [_validated_input(request)]
         expected_hashes = [request.input_sha256]
     else:
@@ -375,9 +392,38 @@ def _verify_official_sharp_checkpoint(*, require_present: bool) -> dict[str, obj
     }
 
 
+def _validate_structurefirst_panorama(width: int, height: int) -> None:
+    """Extend LucidFrame's panorama boundary to true 1:1 half-sphere ERP input.
+
+    LucidFrame's normalizer already has a partial-panorama path that correctly
+    embeds a 1:1 half-sphere image into a 2:1 spherical canvas and marks the
+    unseen half as low-confidence. Its earlier landscape guard made that path
+    unreachable for the canonical 180-degree layout, so StructureFirst replaces
+    only that guard while retaining LucidFrame's unmodified reconstruction code.
+    """
+    if width < 128 or height < 64:
+        raise ValueError("Panorama must be at least 128 by 64 pixels.")
+    ratio = width / height
+    if 0.9 <= ratio <= 1.1:
+        return
+    if ratio < 1.2:
+        raise ValueError(
+            f"This image is {ratio:.2f}:1. A 180° half-sphere panorama must be "
+            "approximately 1:1; other panorama inputs must be landscape."
+        )
+
+
 def _lucidframe_runtime() -> LucidFrameRuntime:
     sharp_wrapper = _import_exact_lucidframe_module("sharp_wrapper")
     sharp360_wrapper = _import_exact_lucidframe_module("sharp360_wrapper")
+    # The callable remains LucidFrame's exact reconstruct_sharp360 function.
+    # Only its input guard is adapted so the normalizer's existing 1:1 partial
+    # panorama branch is reachable. No LucidFrame source file is modified.
+    setattr(
+        sharp360_wrapper,
+        "validate_panorama",
+        _validate_structurefirst_panorama,
+    )
     splat_compiler = _import_exact_lucidframe_module("splat_compiler")
     sharp_predict = importlib.import_module("sharp.cli.predict")
     sharp_predict_path = Path(str(sharp_predict.__file__)).resolve()
@@ -407,6 +453,10 @@ def _lucidframe_runtime() -> LucidFrameRuntime:
         "sharpImplementation": sharp_predict_relative.as_posix(),
         "sharpModelUrl": model_url,
         "sharpCheckpointSha256": OFFICIAL_SHARP_CHECKPOINT_SHA256,
+        "panoramaInputAdapter": (
+            "StructureFirst accepts canonical 1:1 half-sphere ERP input and "
+            "delegates its partial-panorama normalization to LucidFrame"
+        ),
     }
 
     return LucidFrameRuntime(
@@ -432,6 +482,83 @@ def _run_job(
     output_directory.mkdir(parents=True, exist_ok=True)
 
     try:
+        if request.mode == "floorplan":
+            from floorplan_structure import build_floorplan_structure
+
+            assert request.evidence_ids is not None
+            assert request.floor_numbers is not None
+            model = build_floorplan_structure(
+                input_paths,
+                request.evidence_ids,
+                request.floor_numbers,
+                output_directory,
+                request.case_id,
+            )
+            final_fingerprints = [_fingerprint(path) for path in input_paths]
+            if final_fingerprints != input_fingerprints:
+                raise RuntimeError(
+                    "Source plan bytes changed while the structure was vectorizing"
+                )
+            input_files = [
+                {
+                    "evidenceId": evidence_id,
+                    "filename": path.name,
+                    "byteSize": fingerprint.byte_size,
+                    "sha256": fingerprint.sha256,
+                }
+                for evidence_id, path, fingerprint in zip(
+                    request.evidence_ids,
+                    input_paths,
+                    input_fingerprints,
+                    strict=True,
+                )
+            ]
+            manifest = {
+                "schemaVersion": 1,
+                "artifactId": request.job_id,
+                "caseId": request.case_id,
+                "evidenceId": request.evidence_id,
+                "evidenceIds": request.evidence_ids,
+                "createdAt": now_iso(),
+                "adapter": "StructureFirst floorplan boundary 0.1.0",
+                "engine": "StructureFirst plan vectorizer",
+                "model": "arbitrary-angle plan line, polygon, OCR, and stair-symbol extraction",
+                "modelLicense": "StructureFirst Apache-2.0 code; operator-supplied plans",
+                "mode": "floorplan",
+                "pipelineEntrypoint": (
+                    "services/reconstruction/floorplan_structure.py::"
+                    "build_floorplan_structure"
+                ),
+                "inputFiles": input_files,
+                "floorNumbers": request.floor_numbers,
+                "coordinateSystem": model["coordinateSystem"],
+                "metrics": model["metrics"],
+                "confidence": {
+                    "band": "reconstructed",
+                    "state": "derived",
+                    "score": 0.64,
+                },
+                "limitations": model["limitations"],
+            }
+            _write_json_atomic(output_directory / "manifest.json", manifest)
+            base_url = f"/assets/{request.case_id}/reconstruction/{request.job_id}"
+            ready = running.model_copy(
+                update={
+                    "status": "ready",
+                    "updated_at": now_iso(),
+                    "structural_model_url": f"{base_url}/structure.json",
+                    "manifest_url": f"{base_url}/manifest.json",
+                }
+            )
+            _save_state(ready)
+            LOGGER.info(
+                "Structural model %s completed with %d floors and %d wall segments",
+                request.job_id,
+                model["metrics"]["floorCount"],
+                model["metrics"]["wallSegments"],
+            )
+            return
+
         runtime = _lucidframe_runtime()
         _verify_official_sharp_checkpoint(require_present=False)
         registration: dict[str, object] | None = None
@@ -446,28 +573,21 @@ def _run_job(
                     output_directory,
                 )
             except RegistrationError as exc:
-                fallback_used = True
                 fallback_reason = str(exc)
                 registration = {
                     **exc.report,
-                    "status": "partial",
-                    "connectedFrameCount": 1,
-                    "connectedFrames": [0],
-                    "disconnectedFrames": list(range(1, len(input_paths))),
-                    "confidenceScore": 0.18,
-                    "fallbackUsed": True,
+                    "status": "failed",
+                    "confidenceScore": 0.0,
+                    "fallbackUsed": False,
                     "fallbackReason": fallback_reason,
                 }
-                LOGGER.warning(
-                    "Smart connect failed for %s; producing the exact LucidFrame "
-                    "single-image result from the first capture instead: %s",
-                    request.job_id,
-                    fallback_reason,
+                _write_json_atomic(
+                    output_directory / "registration.json", registration
                 )
-                gaussians = exc.fallback_cloud or runtime.reconstruct_sharp(
-                    input_paths[0],
-                    output_directory / "single_image_fallback",
-                )
+                raise RuntimeError(
+                    "No joint Gaussian house was produced because the uploaded "
+                    f"photographs did not form a verified overlap graph: {fallback_reason}"
+                ) from exc
             _write_json_atomic(output_directory / "registration.json", registration)
         elif request.mode == "panorama":
             gaussians = runtime.reconstruct_sharp360(
@@ -587,7 +707,8 @@ def _run_job(
             "pipelineEntrypoint": pipeline_entrypoint,
             "sourceFileDelivery": (
                 "Original stored file path passed directly to LucidFrame; "
-                "decoding and required 1536x1536 preprocessing occur inside SHARP."
+                "decoding, panorama normalization when applicable, and model "
+                "preprocessing occur inside LucidFrame/SHARP."
             ),
             "fallbackUsed": fallback_used,
             "fallbackReason": fallback_reason,
@@ -716,6 +837,21 @@ def health() -> dict[str, object]:
             1 for state in JOBS.values() if state.status in {"queued", "running"}
         ),
     }
+
+
+@app.get("/detector")
+def detector_health() -> dict[str, object]:
+    return detector_status()
+
+
+@app.post("/detect-frame")
+def detect_frame(request: DetectionFrameRequest) -> dict[str, object]:
+    try:
+        return detect_data_url(request.image_data_url, request.score_threshold)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 
 @app.post("/jobs", response_model=JobState, status_code=status.HTTP_202_ACCEPTED)

@@ -1,0 +1,62 @@
+{
+  "schemaVersion": 1,
+  "datasetId": "bedroom-four-view-phone-burst",
+  "passed": true,
+  "checks": {
+    "registrationRecall": true,
+    "registrationPrecision": true,
+    "rotationAgreement": true,
+    "gaussianCount": true,
+    "jointCameraAccepted": true,
+    "poseGraphImproved": true,
+    "inputHashes": true
+  },
+  "metrics": {
+    "expectedRegistered": [0, 1, 2, 3],
+    "registered": [0, 1, 2, 3],
+    "registrationRecall": 1.0,
+    "registrationPrecision": 1.0,
+    "roomCompleteness": {
+      "bedroom-a": 1.0
+    },
+    "jointCameraAccepted": true,
+    "rotationAgreementMedianDegrees": 2.0349,
+    "poseGraphBeforeRmse": 0.0644981,
+    "poseGraphAfterRmse": 0.0498477,
+    "gaussianCount": 4709048,
+    "gpu": "NVIDIA GeForce RTX 4080 Laptop GPU",
+    "peakVramMb": 6765.1,
+    "legacyConnectedFrameGain": 2
+  },
+  "inputVerification": {
+    "requested": true,
+    "passed": true,
+    "files": [
+      {
+        "index": 0,
+        "exists": true,
+        "sha256Matches": true
+      },
+      {
+        "index": 1,
+        "exists": true,
+        "sha256Matches": true
+      },
+      {
+        "index": 2,
+        "exists": true,
+        "sha256Matches": true
+      },
+      {
+        "index": 3,
+        "exists": true,
+        "sha256Matches": true
+      }
+    ]
+  },
+  "limitations": [
+    "This dataset validates one room and one capture device.",
+    "Registration metrics do not validate unseen surfaces or safe routes.",
+    "Room/floor labels require separate ground-truth evaluation."
+  ]
+}

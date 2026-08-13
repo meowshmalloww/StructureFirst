@@ -10,9 +10,12 @@
   "scripts": {
     "dev": "npm run build -w @structurefirst/contracts && concurrently -k -n server,web -c blue,green \"npm run dev -w @structurefirst/server\" \"npm run dev -w @structurefirst/web\"",
     "dev:full": "npm run build -w @structurefirst/contracts && concurrently -k -n worker,server,web -c magenta,blue,green \"npm run worker\" \"npm run dev -w @structurefirst/server\" \"npm run dev -w @structurefirst/web\"",
+    "desktop:dev": "npm run build -w @structurefirst/contracts && concurrently -k -n worker,server,web,desktop -c magenta,blue,green,cyan \"npm run worker\" \"npm run dev -w @structurefirst/server\" \"npm run dev -w @structurefirst/web\" \"npm run dev -w @structurefirst/desktop\"",
     "worker": "python -m uvicorn app:app --app-dir services/reconstruction --host 127.0.0.1 --port 8010",
-    "build": "npm run build -w @structurefirst/contracts && npm run build -w @structurefirst/server && npm run build -w @structurefirst/web",
-    "check": "npm run check -w @structurefirst/contracts && npm run check -w @structurefirst/server && npm run check -w @structurefirst/web",
+    "rescue:rtx": "powershell -ExecutionPolicy Bypass -File ./scripts/launch-rescue-view-rtx.ps1",
+    "rescue:rtx:configure": "powershell -ExecutionPolicy Bypass -File ./scripts/launch-rescue-view-rtx.ps1 -ConfigureOnly",
+    "build": "npm run build -w @structurefirst/contracts && npm run build -w @structurefirst/server && npm run build -w @structurefirst/web && npm run build -w @structurefirst/desktop",
+    "check": "npm run check -w @structurefirst/contracts && npm run build -w @structurefirst/contracts && npm run check -w @structurefirst/server && npm run check -w @structurefirst/web && npm run check -w @structurefirst/desktop",
     "test": "npm run test -w @structurefirst/server && npm run test -w @structurefirst/web",
     "format": "prettier --write .",
     "format:check": "prettier --check ."

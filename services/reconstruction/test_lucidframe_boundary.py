@@ -18,9 +18,14 @@ import app as worker  # noqa: E402
 def test_runtime_is_pinned_to_local_lucidframe_and_official_sharp() -> None:
     runtime = worker._lucidframe_runtime()
     checkpoint = worker._verify_official_sharp_checkpoint(require_present=True)
+    sharp360_wrapper = sys.modules["sharp360_wrapper"]
 
     assert runtime.reconstruct_sharp.__module__ == "sharp_wrapper"
     assert runtime.reconstruct_sharp360.__module__ == "sharp360_wrapper"
+    assert (
+        sharp360_wrapper.validate_panorama
+        is worker._validate_structurefirst_panorama
+    )
     assert runtime.compile_splat.__module__ == "splat_compiler"
     assert runtime.provenance["sharpModelUrl"] == worker.OFFICIAL_SHARP_MODEL_URL
     assert (
@@ -29,6 +34,14 @@ def test_runtime_is_pinned_to_local_lucidframe_and_official_sharp() -> None:
     )
     assert checkpoint["verified"] is True
     assert checkpoint["sha256"] == worker.OFFICIAL_SHARP_CHECKPOINT_SHA256
+
+
+def test_panorama_boundary_accepts_true_half_sphere_and_rejects_ambiguous_ratio() -> None:
+    worker._validate_structurefirst_panorama(6446, 6446)
+    worker._validate_structurefirst_panorama(12892, 6446)
+
+    with pytest.raises(ValueError, match="approximately 1:1"):
+        worker._validate_structurefirst_panorama(1150, 1000)
 
 
 def test_input_validation_requires_the_stored_exact_bytes(
@@ -154,7 +167,7 @@ def test_single_image_job_calls_lucidframe_with_the_original_path_and_no_fallbac
     assert "Original stored file path" in manifest["sourceFileDelivery"]
 
 
-def test_multi_image_registration_failure_still_returns_exact_lucidframe_scene(
+def test_multi_image_registration_failure_does_not_claim_a_gaussian_house(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     import smart_connect
@@ -237,18 +250,19 @@ def test_multi_image_registration_failure_still_returns_exact_lucidframe_scene(
     worker._run_job(request, sources, fingerprints)
 
     completed = worker._load_state(request.job_id)
-    assert completed is not None and completed.status == "ready"
-    assert completed.fallback_used is True
-    assert completed.registration_status == "partial"
-    assert calls == [sources[0]]
-    manifest_path = (
+    assert completed is not None and completed.status == "failed"
+    assert completed.fallback_used is False
+    assert completed.registration_status == "failed"
+    assert completed.error is not None
+    assert "No joint Gaussian house was produced" in completed.error
+    assert calls == []
+    registration_path = (
         cases_root
         / case_id
         / "reconstruction"
         / request.job_id
-        / "manifest.json"
+        / "registration.json"
     )
-    manifest = json.loads(manifest_path.read_text("utf-8"))
-    assert manifest["fallbackUsed"] is True
-    assert manifest["model"] == "Apple SHARP single-image fallback"
-    assert manifest["registration"]["connectedFrames"] == [0]
+    registration = json.loads(registration_path.read_text("utf-8"))
+    assert registration["fallbackUsed"] is False
+    assert registration["status"] == "failed"

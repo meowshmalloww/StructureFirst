@@ -200,7 +200,7 @@ export class SettingsService {
     const discovery = DiscoverySettingsSchema.parse({
       openverseEnabled: stored?.openverseEnabled ?? true,
       browserEnabled: stored?.browserEnabled ?? true,
-      browserAgentEnabled: stored?.browserAgentEnabled ?? false,
+      browserAgentEnabled: stored?.browserAgentEnabled ?? true,
       browserAgentMaxSteps: stored?.browserAgentMaxSteps ?? 20,
       ...(effectivePath ? { browserExecutablePath: effectivePath } : {}),
       braveConfigured: Boolean(storedKey ?? envKey),
@@ -494,7 +494,7 @@ export class SettingsService {
     return {
       openverseEnabled: stored?.openverseEnabled ?? true,
       browserEnabled: stored?.browserEnabled ?? true,
-      browserAgentEnabled: stored?.browserAgentEnabled ?? false,
+      browserAgentEnabled: stored?.browserAgentEnabled ?? true,
       browserAgentMaxSteps: stored?.browserAgentMaxSteps ?? 20,
       ...(browserExecutablePath ? { browserExecutablePath } : {}),
       ...(braveApiKey ? { braveApiKey } : {}),

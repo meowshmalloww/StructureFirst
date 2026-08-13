@@ -7,11 +7,73 @@ import { CaseEventHub } from "./events.js";
 import { confidence } from "./lib/confidence.js";
 import { createId, nowIso } from "./lib/ids.js";
 import { CasePipeline } from "./pipeline.js";
-import { SceneIntelligenceService } from "./scene-intelligence.js";
+import {
+  normalizeGeneratedScene,
+  inferObservedLevels,
+  SceneIntelligenceService,
+  spatialEvidenceGroups,
+} from "./scene-intelligence.js";
+
+import type { EvidenceAsset, RoomType } from "@structurefirst/contracts";
 import { SettingsService } from "./settings.js";
 import { StructureStore } from "./store.js";
 
 const directories: string[] = [];
+
+describe("visual classification normalization", () => {
+  it("corrects window-driven exterior and laundry-as-kitchen errors", () => {
+    expect(
+      normalizeGeneratedScene({
+        sceneType: "exterior",
+        roomType: "kitchen",
+        floorHint: "unknown",
+        roomLabels: [],
+        propertyRelevance: "likely",
+        observedAddress: "",
+        connections: ["door"],
+        summary: "A washer and dryer are visible beside a utility sink.",
+        confidenceScore: 0.6,
+      }),
+    ).toMatchObject({ sceneType: "interior", roomType: "utility" });
+  });
+
+  it("recovers a strongly evidenced room when the model contradicts its own summary", () => {
+    expect(
+      normalizeGeneratedScene({
+        sceneType: "unknown",
+        roomType: "unknown",
+        floorHint: "unknown",
+        roomLabels: [],
+        propertyRelevance: "unlikely",
+        observedAddress: "",
+        connections: [],
+        summary:
+          "The image shows a kitchen with a stove, sink, refrigerator, cabinets, and a window.",
+        confidenceScore: 0.5,
+      }),
+    ).toMatchObject({
+      sceneType: "interior",
+      roomType: "kitchen",
+      propertyRelevance: "likely",
+    });
+  });
+
+  it("does not turn unrelated imagery into a room", () => {
+    expect(
+      normalizeGeneratedScene({
+        sceneType: "non_property",
+        roomType: "unknown",
+        floorHint: "unknown",
+        roomLabels: [],
+        propertyRelevance: "unlikely",
+        observedAddress: "",
+        connections: [],
+        summary: "A cat resting on a wooden floor.",
+        confidenceScore: 0.9,
+      }),
+    ).toMatchObject({ sceneType: "non_property", roomType: "unknown" });
+  });
+});
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -20,6 +82,74 @@ afterEach(() => {
 });
 
 describe("scene intelligence", () => {
+  it("derives conservative observed levels from calibrated camera elevation", () => {
+    const poses = [
+      cameraPose("lower_a", [0, 0, 0]),
+      cameraPose("lower_b", [1, 0.15, 0.4]),
+      cameraPose("upper_a", [0.2, -2.75, 0.3]),
+      cameraPose("upper_b", [1.1, -2.9, 0.5]),
+    ];
+    const levels = inferObservedLevels(poses);
+
+    expect(Object.fromEntries(levels)).toEqual({
+      lower_a: 0,
+      lower_b: 0,
+      upper_a: 1,
+      upper_b: 1,
+    });
+
+    const evidence = [
+      classifiedFrame("lower_a", "bedroom", 0),
+      classifiedFrame("lower_b", "bedroom", 1),
+      classifiedFrame("upper_a", "bedroom", 2),
+      classifiedFrame("upper_b", "bedroom", 3),
+    ];
+    const groups = spatialEvidenceGroups(
+      evidence,
+      evidence.map((item) => item.id),
+      [
+        { frameA: 0, frameB: 1, confidence: 0.9 },
+        { frameA: 1, frameB: 2, confidence: 0.9 },
+        { frameA: 2, frameB: 3, confidence: 0.9 },
+      ],
+      new Map(poses.map((pose) => [pose.evidenceId, pose.position])),
+      levels,
+    );
+
+    expect(groups.map((group) => group.observedLevel)).toEqual([0, 1]);
+    expect(
+      groups.map((group) => group.evidence.map((item) => item.id)),
+    ).toEqual([
+      ["lower_a", "lower_b"],
+      ["upper_a", "upper_b"],
+    ]);
+  });
+
+  it("keeps two bedrooms distinct when their verified overlap paths do not join", () => {
+    const evidence = [
+      classifiedFrame("frame_a", "bedroom", 0),
+      classifiedFrame("frame_b", "bedroom", 1),
+      classifiedFrame("hallway", "corridor", 2),
+      classifiedFrame("frame_c", "bedroom", 3),
+      classifiedFrame("frame_d", "bedroom", 4),
+    ];
+    const groups = spatialEvidenceGroups(
+      evidence,
+      evidence.map((item) => item.id),
+      [
+        { frameA: 0, frameB: 1, confidence: 0.9 },
+        { frameA: 1, frameB: 2, confidence: 0.8 },
+        { frameA: 2, frameB: 3, confidence: 0.8 },
+        { frameA: 3, frameB: 4, confidence: 0.9 },
+      ],
+      new Map(),
+    );
+
+    expect(
+      groups.map((group) => group.evidence.map((item) => item.id)),
+    ).toEqual([["frame_a", "frame_b"], ["hallway"], ["frame_c", "frame_d"]]);
+  });
+
   it("classifies permitted imagery and builds a floor-aware room node", async () => {
     const directory = mkdtempSync(resolve(tmpdir(), "structurefirst-scene-"));
     directories.push(directory);
@@ -117,8 +247,9 @@ describe("scene intelligence", () => {
         observedAddress: "",
       },
     });
+    const artifactId = createId("artifact");
     store.putArtifact({
-      id: createId("artifact"),
+      id: artifactId,
       caseId: created.id,
       evidenceId,
       evidenceIds: [evidenceId],
@@ -128,6 +259,22 @@ describe("scene intelligence", () => {
       gaussianCount: 1_000,
       modelName: "Test",
       modelLicense: "Test",
+      geometry: {
+        backend: "sharp_single_view",
+        coordinateFrame: "anchor_camera_metric_opencv",
+        jointCameraAccepted: false,
+        cameraPoses: [
+          {
+            evidenceId,
+            sourceIndex: 0,
+            position: [1, 2, 3],
+            rotationWxyz: [1, 0, 0, 0],
+            scale: 1,
+            placement: "anchor",
+            confidenceScore: 0.5,
+          },
+        ],
+      },
       createdAt: nowIso(),
       updatedAt: nowIso(),
       confidence: confidence(0.5, "reconstructed", "derived", "Test", 1),
@@ -138,10 +285,72 @@ describe("scene intelligence", () => {
       expect.objectContaining({
         label: "Bedroom · Upper floor",
         kind: "room",
+        artifactId,
+        coordinateFrameId: artifactId,
+        roomType: "bedroom",
         floorLabel: "Upper floor",
+        position: [1, 2, 3],
         sourceIds: [evidenceId],
       }),
     ]);
     store.close();
   });
 });
+
+function cameraPose(evidenceId: string, position: [number, number, number]) {
+  return {
+    evidenceId,
+    sourceIndex: 0,
+    position,
+    rotationWxyz: [1, 0, 0, 0] as [number, number, number, number],
+    scale: 1,
+    placement: "measured_feature_and_sharp_metric" as const,
+    confidenceScore: 0.8,
+  };
+}
+
+function classifiedFrame(
+  id: string,
+  roomType: RoomType,
+  captureOrder: number,
+): EvidenceAsset {
+  return {
+    id,
+    caseId: "case_room_graph",
+    title: id,
+    kind: "image",
+    sourceProvider: "Responder upload",
+    localUrl: `/assets/case_room_graph/uploads/${id}.jpg`,
+    discoveredAt: nowIso(),
+    rights: "operator_owned",
+    cachePolicy: "local_allowed",
+    redistributable: false,
+    validation: "operator_uploaded",
+    mimeType: "image/jpeg",
+    tags: ["operator-upload"],
+    notes: "Test capture",
+    capture: {
+      projection: "perspective",
+      width: 1920,
+      height: 1080,
+      horizontalCoverageDegrees: 70,
+      captureOrder,
+      overlapSetId: "capture_room_graph",
+      projectionSource: "operator",
+    },
+    visualAnalysis: {
+      sceneType: "interior",
+      roomType,
+      floorHint: "ground",
+      propertyRelevance: "likely",
+      addressMatch: "possible",
+      connections: roomType === "corridor" ? ["corridor", "door"] : ["door"],
+      summary: `Visible ${roomType}.`,
+      provider: "nvidia_nim",
+      model: "test-model",
+      confidenceScore: 0.9,
+      analyzedAt: nowIso(),
+    },
+    confidence: confidence(0.8, "verified", "observed", "Test", 1),
+  };
+}

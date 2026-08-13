@@ -135,7 +135,7 @@ export function DashboardPage() {
           </span>
           <div>
             <h2 id="new-property-title">Prepare a property</h2>
-            <p>Enter an address to begin mapping and image collection.</p>
+            <p>Enter an address, then add a manual whole-house capture set.</p>
           </div>
         </div>
         <form
@@ -165,8 +165,8 @@ export function DashboardPage() {
           </button>
         </form>
         <small className="intake-note">
-          Public imagery works without an AI key. Analysis providers are
-          optional.
+          Geometric matching works without an AI key. A vision model adds room
+          and floor labels.
         </small>
         {error ? (
           <p className="inline-error" role="alert">

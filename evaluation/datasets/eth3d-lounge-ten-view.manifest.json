@@ -1,0 +1,98 @@
+{
+  "schemaVersion": 1,
+  "id": "eth3d-lounge-ten-view",
+  "description": "Ten full-resolution ETH3D indoor lounge captures containing two visually disconnected room components. The primary six-view reconstruction must not falsely fuse the separate four-view component.",
+  "rights": "ETH3D academic benchmark; source pixels are downloaded locally and are not redistributed by StructureFirst.",
+  "source": {
+    "dataset": "ETH3D high-resolution multi-view training data",
+    "scene": "lounge",
+    "url": "https://www.eth3d.net/data/lounge_dslr_undistorted.7z",
+    "archiveSha256": "c392ea321ed97002d43384a32bdd8e4e9eec0caa21d1aa3f4866c95317ce0f73"
+  },
+  "inputRoot": "../../data/evaluation/eth3d-lounge/lounge/images/dslr_images_undistorted",
+  "frames": [
+    {
+      "index": 0,
+      "file": "DSC_1095.JPG",
+      "sha256": "93cc45e6371b3c55750d07501e3bfbfe767ec7e4ccaf3fe24fb32edcc2ec7fa4",
+      "roomId": "lounge-primary",
+      "expectedRegistered": true
+    },
+    {
+      "index": 1,
+      "file": "DSC_1096.JPG",
+      "sha256": "3f6df082c91a28eadc5fed72280588a63f9da8d5ca1fb0a119bb4ec6bf265f2e",
+      "roomId": "lounge-primary",
+      "expectedRegistered": true
+    },
+    {
+      "index": 2,
+      "file": "DSC_1097.JPG",
+      "sha256": "7edec2c3418f1b48d36213db80fe59063a00acbedec2351e7d1c1a4a8c908343",
+      "roomId": "lounge-primary",
+      "expectedRegistered": true
+    },
+    {
+      "index": 3,
+      "file": "DSC_1098.JPG",
+      "sha256": "2056c3a3f54916fec0d9923a7a660195e4da2fd4fb1d8a827dc622cf47bffcf5",
+      "roomId": "lounge-primary",
+      "expectedRegistered": true
+    },
+    {
+      "index": 4,
+      "file": "DSC_1099.JPG",
+      "sha256": "0e8cda6e5767071bedd51b3ac7103cd825ab805abd2de43b2b550fabdf0c7848",
+      "roomId": "lounge-primary",
+      "expectedRegistered": true
+    },
+    {
+      "index": 5,
+      "file": "DSC_1100.JPG",
+      "sha256": "d7fbc4941c5e7e71b29e94c418f80a58104dda54a9de1aedc6b0fb9105046205",
+      "roomId": "lounge-primary",
+      "expectedRegistered": true
+    },
+    {
+      "index": 6,
+      "file": "DSC_1112.JPG",
+      "sha256": "fb7eaf6f68f374cad9aafca20c9bc24c95cddf2a4da8bbdc5a0f0a3aec2c1757",
+      "roomId": "lounge-secondary",
+      "expectedRegistered": false
+    },
+    {
+      "index": 7,
+      "file": "DSC_1113.JPG",
+      "sha256": "ccc50483fb208a71b83d2a4a1321babed78dcae76a58e45ba17d7d20494743a5",
+      "roomId": "lounge-secondary",
+      "expectedRegistered": false
+    },
+    {
+      "index": 8,
+      "file": "DSC_1114.JPG",
+      "sha256": "4c9c435bb8312537d7d606ac38f0737691f0ae3cdf6631c09ae9967a9192caad",
+      "roomId": "lounge-secondary",
+      "expectedRegistered": false
+    },
+    {
+      "index": 9,
+      "file": "DSC_1116.JPG",
+      "sha256": "623750823519d4fd7527338c6282c6d0108aef5720db693287d16e42a8f319c4",
+      "roomId": "lounge-secondary",
+      "expectedRegistered": false
+    }
+  ],
+  "thresholds": {
+    "minimumRegistrationRecall": 1.0,
+    "minimumRegistrationPrecision": 1.0,
+    "maximumRotationAgreementMedianDegrees": 15.0,
+    "minimumGaussianCount": 7000000,
+    "requireJointCameraAcceptance": true,
+    "requirePoseGraphImprovement": true,
+    "requirePointOptimization": true,
+    "maximumPointRmseMeters": 0.5,
+    "requireOverlapColorImprovement": true,
+    "minimumOverlapColorSamples": 1000,
+    "requireScaleCountPreserved": true
+  }
+}

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { parseAgentAction } from "./browser-agent.js";
+import { isAllowedNavigation, parseAgentAction } from "./browser-agent.js";
 
 describe("browser agent action parser", () => {
   it("parses a plain JSON action", () => {
@@ -11,12 +11,24 @@ describe("browser agent action parser", () => {
   });
 
   it("strips code fences", () => {
-    const raw = "```json\n{\"name\":\"type\",\"ref\":\"sf1\",\"text\":\"123 Main St\",\"submit\":true}\n```";
+    const raw =
+      '```json\n{"name":"type","ref":"sf1","text":"123 Main St","submit":true}\n```';
     expect(parseAgentAction(raw)).toEqual({
       name: "type",
       ref: "sf1",
       text: "123 Main St",
       submit: true,
+    });
+  });
+
+  it("accepts type as a provider-compatible action discriminator", () => {
+    expect(
+      parseAgentAction(
+        '{"type":"goto","url":"https://www.bing.com/search?q=address"}',
+      ),
+    ).toEqual({
+      name: "goto",
+      url: "https://www.bing.com/search?q=address",
     });
   });
 
@@ -49,5 +61,25 @@ describe("browser agent action parser", () => {
         'Sure, here is the next action: {"name":"scroll","direction":"down"} that should help.',
       ),
     ).toEqual({ name: "scroll", direction: "down" });
+  });
+
+  it("blocks automated Zillow, Redfin, Google imagery, and login navigation", () => {
+    for (const url of [
+      "https://www.zillow.com/homedetails/example",
+      "https://www.redfin.com/WA/Seattle/example/home/123",
+      "https://maps.google.com/example",
+      "https://accounts.google.com/signin",
+    ]) {
+      expect(isAllowedNavigation(url)).toBe(false);
+    }
+  });
+
+  it("allows search and non-blocked public source navigation", () => {
+    expect(isAllowedNavigation("https://www.bing.com/search?q=address")).toBe(
+      true,
+    );
+    expect(isAllowedNavigation("https://www.loc.gov/pictures/item/123")).toBe(
+      true,
+    );
   });
 });

@@ -1,0 +1,43 @@
+{
+  "schemaVersion": 1,
+  "datasetId": "eth3d-lounge-ten-view",
+  "component": "lounge-primary",
+  "passed": true,
+  "checks": {
+    "inputHashes": true,
+    "registrationRecall": true,
+    "registrationPrecision": true,
+    "separateComponentNotFused": true,
+    "jointCameraAccepted": true,
+    "poseGraphImproved": true,
+    "pointOptimization": true,
+    "pointRmse": true,
+    "overlapColorImproved": true,
+    "overlapColorSamples": true,
+    "scaleCountPreserved": true
+  },
+  "metrics": {
+    "registeredFrames": 6,
+    "frameCount": 10,
+    "separateVerifiedFrames": 4,
+    "crossComponentGroundTruthTrackCount": 0,
+    "gaussianCount": 7028387,
+    "rotationAgreementMedianDegrees": 3.5249,
+    "poseGraphBeforeRmse": 0.447636,
+    "poseGraphAfterRmse": 0.4005716,
+    "pointConstraintCount": 2743,
+    "pointBeforeRmseMeters": 0.4020168,
+    "pointAfterRmseMeters": 0.3927892,
+    "overlapColorSamples": 1891,
+    "overlapColorBeforeRmse": 0.102767,
+    "overlapColorAfterRmse": 0.0515219,
+    "scaleAdjustedGaussians": 0,
+    "scaleDeletedGaussians": 0,
+    "gpu": "NVIDIA GeForce RTX 4080 Laptop GPU",
+    "peakVramMb": 6393.3
+  },
+  "limitations": [
+    "The primary and secondary components have no verified visual transform, so their relative room placement remains unknown.",
+    "Observed visual geometry does not establish unseen surfaces or a safe route."
+  ]
+}

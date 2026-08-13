@@ -29,6 +29,26 @@ import type {
 
 type Session = { required: boolean; authenticated: boolean };
 
+export type LiveDetection = {
+  label: string;
+  score: number;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  tacticalLabel: string;
+  priority: "standard" | "attention" | "critical";
+};
+
+export type LiveDetectionResult = {
+  detections: LiveDetection[];
+  model: string;
+  provider: string;
+  inferenceMs: number;
+  imageWidth: number;
+  imageHeight: number;
+};
+
 export class ApiRequestError extends Error {
   constructor(
     message: string,
@@ -74,6 +94,11 @@ export const api = {
   logout: () => request<Session>("/api/auth/session", { method: "DELETE" }),
   health: () => request<SystemHealth>("/api/health"),
   settings: () => request<AppSettings>("/api/settings"),
+  detectFrame: (imageDataUrl: string, scoreThreshold = 0.34) =>
+    request<LiveDetectionResult>("/api/detection/frame", {
+      method: "POST",
+      body: JSON.stringify({ imageDataUrl, scoreThreshold }),
+    }),
   saveProvider: (provider: AiProviderId, input: SaveAiProviderInput) =>
     request<AiProviderSettings>(
       `/api/settings/providers/${encodeURIComponent(provider)}`,

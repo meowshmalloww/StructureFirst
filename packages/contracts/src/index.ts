@@ -231,6 +231,8 @@ export const EvidenceVisualAnalysisSchema = z.object({
   sceneType: EvidenceSceneTypeSchema,
   roomType: RoomTypeSchema,
   floorHint: FloorHintSchema,
+  floorNumber: z.number().int().min(-5).max(200).optional(),
+  roomLabels: z.array(z.string().trim().min(1).max(120)).max(40).default([]),
   propertyRelevance: z.enum(["likely", "unlikely", "unknown"]),
   addressMatch: z.enum(["supported", "possible", "contradictory", "unknown"]),
   observedAddress: z.string().max(300).optional(),
@@ -246,6 +248,32 @@ export const EvidenceVisualAnalysisSchema = z.object({
 export type EvidenceVisualAnalysis = z.infer<
   typeof EvidenceVisualAnalysisSchema
 >;
+
+export const CaptureProjectionSchema = z.enum([
+  "perspective",
+  "panorama_180",
+  "panorama_360",
+]);
+export type CaptureProjection = z.infer<typeof CaptureProjectionSchema>;
+
+export const CaptureUploadModeSchema = z.enum([
+  "auto",
+  "perspective",
+  "panorama_180",
+  "panorama_360",
+]);
+export type CaptureUploadMode = z.infer<typeof CaptureUploadModeSchema>;
+
+export const CaptureInfoSchema = z.object({
+  projection: CaptureProjectionSchema,
+  width: z.number().int().positive(),
+  height: z.number().int().positive(),
+  horizontalCoverageDegrees: z.number().min(1).max(360),
+  captureOrder: z.number().int().nonnegative(),
+  overlapSetId: IdSchema,
+  projectionSource: z.enum(["operator", "aspect_ratio", "default"]),
+});
+export type CaptureInfo = z.infer<typeof CaptureInfoSchema>;
 
 export const EvidenceAssetSchema = z.object({
   id: IdSchema,
@@ -272,6 +300,7 @@ export const EvidenceAssetSchema = z.object({
   notes: z.string(),
   confidence: ConfidenceSchema,
   visualAnalysis: EvidenceVisualAnalysisSchema.optional(),
+  capture: CaptureInfoSchema.optional(),
 });
 export type EvidenceAsset = z.infer<typeof EvidenceAssetSchema>;
 
@@ -371,7 +400,7 @@ export type DiscoverySettings = z.infer<typeof DiscoverySettingsSchema>;
 export const SaveDiscoverySettingsInputSchema = z.object({
   openverseEnabled: z.boolean(),
   browserEnabled: z.boolean(),
-  browserAgentEnabled: z.boolean().default(false),
+  browserAgentEnabled: z.boolean().default(true),
   browserAgentMaxSteps: z.number().int().min(4).max(60).default(20),
   browserExecutablePath: z.string().trim().max(1000).optional(),
   clearBrowserExecutablePath: z.boolean().default(false),
@@ -405,8 +434,11 @@ export const SpatialNodeKindSchema = z.enum([
 export const SpatialNodeSchema = z.object({
   id: IdSchema,
   caseId: IdSchema,
+  artifactId: IdSchema.optional(),
+  coordinateFrameId: IdSchema.optional(),
   label: z.string().min(1),
   kind: SpatialNodeKindSchema,
+  roomType: RoomTypeSchema.optional(),
   level: z.number().int().optional(),
   floorLabel: z
     .enum(["Basement", "Ground floor", "Upper floor", "Attic", "Unknown floor"])
@@ -483,19 +515,75 @@ export const RouteCandidateSchema = z.object({
 });
 export type RouteCandidate = z.infer<typeof RouteCandidateSchema>;
 
+export const ReconstructionCameraPoseSchema = z.object({
+  evidenceId: IdSchema,
+  sourceIndex: z.number().int().nonnegative(),
+  position: z.tuple([z.number(), z.number(), z.number()]),
+  rotationWxyz: z.tuple([z.number(), z.number(), z.number(), z.number()]),
+  scale: z.number().positive(),
+  placement: z.enum([
+    "anchor",
+    "measured_feature_and_sharp_metric",
+    "joint_camera_calibrated_by_metric_core",
+  ]),
+  confidenceScore: z.number().min(0).max(1),
+});
+export type ReconstructionCameraPose = z.infer<
+  typeof ReconstructionCameraPoseSchema
+>;
+
+export const ReconstructionGeometrySchema = z.object({
+  backend: z.enum([
+    "sharp_single_view",
+    "sharp360",
+    "vggt_sharp_joint",
+    "floorplan_vector_extrusion",
+  ]),
+  coordinateFrame: z.enum([
+    "anchor_camera_metric_opencv",
+    "floorplan_metric_y_up",
+  ]),
+  gpu: z.string().max(300).optional(),
+  cuda: z.string().max(80).optional(),
+  peakVramMb: z.number().nonnegative().optional(),
+  jointCameraAccepted: z.boolean(),
+  cameraPoses: z.array(ReconstructionCameraPoseSchema).max(50),
+  horizontalCoverageDegrees: z.number().min(1).max(360).optional(),
+});
+export type ReconstructionGeometry = z.infer<
+  typeof ReconstructionGeometrySchema
+>;
+
+export const ReconstructionQualitySchema = z.object({
+  registeredRatio: z.number().min(0).max(1),
+  missingBridgeEvidenceIds: z.array(IdSchema),
+  poseGraphBeforeRmse: z.number().nonnegative().optional(),
+  poseGraphAfterRmse: z.number().nonnegative().optional(),
+  denseSurfaceBeforeRmseMeters: z.number().nonnegative().optional(),
+  denseSurfaceAfterRmseMeters: z.number().nonnegative().optional(),
+  rotationAgreementMedianDeg: z.number().nonnegative().optional(),
+  cleanupRemovedGaussians: z.number().int().nonnegative(),
+  crossViewSupportedRatio: z.number().min(0).max(1).optional(),
+  sourceCoverageAdjustedGaussians: z.number().int().nonnegative().optional(),
+});
+export type ReconstructionQuality = z.infer<typeof ReconstructionQualitySchema>;
+
 export const ReconstructionArtifactSchema = z.object({
   id: IdSchema,
   caseId: IdSchema,
   evidenceId: IdSchema,
   evidenceIds: z.array(IdSchema).min(1).optional(),
   status: z.enum(["queued", "running", "ready", "failed"]),
-  mode: z.enum(["single_image", "panorama", "multi_image"]),
+  mode: z.enum(["single_image", "panorama", "multi_image", "floorplan"]),
   splatUrl: z.string().optional(),
+  structuralModelUrl: z.string().optional(),
   manifestUrl: z.string().optional(),
   gaussianCount: z.number().int().positive().optional(),
   modelName: z.string(),
   modelLicense: z.string(),
   error: z.string().optional(),
+  geometry: ReconstructionGeometrySchema.optional(),
+  quality: ReconstructionQualitySchema.optional(),
   registration: z
     .object({
       status: z.enum(["connected", "partial", "failed"]),
@@ -572,9 +660,34 @@ export type MultiReconstructionRequest = z.infer<
   typeof MultiReconstructionRequestSchema
 >;
 
+export const CaptureBatchSchema = z.object({
+  index: z.number().int().nonnegative(),
+  evidenceIds: z.array(IdSchema).min(1).max(12),
+  bridgeEvidenceIds: z.array(IdSchema).max(11),
+});
+export type CaptureBatch = z.infer<typeof CaptureBatchSchema>;
+
+export const CaptureSetPlanSchema = z.object({
+  totalFrames: z.number().int().nonnegative(),
+  eligibleFrames: z.number().int().nonnegative(),
+  excludedFrames: z.number().int().nonnegative(),
+  maxFramesPerBatch: z.number().int().min(2).max(12),
+  bridgeFramesPerBatch: z.number().int().min(1).max(11),
+  batches: z.array(CaptureBatchSchema).max(50),
+  note: z.string().min(1),
+});
+export type CaptureSetPlan = z.infer<typeof CaptureSetPlanSchema>;
+
 export const PhotoUploadResultSchema = z.object({
   assets: z.array(EvidenceAssetSchema).min(1),
   artifact: ReconstructionArtifactSchema.optional(),
+  artifacts: z.array(ReconstructionArtifactSchema).optional(),
+  capturePlan: CaptureSetPlanSchema.optional(),
+  processing: z.object({
+    status: z.literal("organizing"),
+    totalFiles: z.number().int().positive(),
+    planCandidates: z.number().int().nonnegative(),
+  }),
   note: z.string(),
 });
 export type PhotoUploadResult = z.infer<typeof PhotoUploadResultSchema>;

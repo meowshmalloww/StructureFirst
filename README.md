@@ -1,46 +1,90 @@
 # StructureFirst
 
 StructureFirst turns connected photographs of a property into a navigable
-**Rescue View** for emergency teams. The current MVP resolves an address,
-searches for reusable images, verifies which photographs actually overlap, and
-uses local LucidFrame reconstruction to build the 3D view.
+**Rescue View** for emergency teams. The current MVP accepts a manual capture
+set, verifies which photographs actually overlap, organizes connected views
+into rooms and floors, and uses local LucidFrame reconstruction to build the 3D
+view.
 
 The product is intentionally simple:
 
 1. Enter an address.
-2. StructureFirst searches automatically.
-3. Openly reusable photos are imported with their source and license.
-4. Only visually connected photographs enter the multi-image reconstruction.
-5. Open Rescue View and navigate the resulting Gaussian scene.
-6. Add overlapping responder photos at any time for a better result.
+2. Add one ordered capture walk through the property.
+3. Only visually connected photographs enter reconstruction.
+4. Large capture sets become overlapping GPU-safe jobs with shared doorway,
+   corridor, or stair bridge frames.
+5. Open Rescue View and move between verified room and floor segments.
 
 ## What works
 
 - Address resolution and OpenStreetMap building footprints
-- Keyless KartaView, Wikimedia Commons, Openverse, and Chrome/Edge search
-- Optional Brave Search for a structured image index
-- Automatic import of public-domain, CC0, CC BY, and CC BY-SA photos
+- Manual whole-house capture sets up to 50 files and 1 GB
+- Natural filename ordering plus geometry-verified view matching
 - LucidFrame SHARP reconstruction with SIFT, indoor LoFTR, and
   correspondence-verified metric smart connect
-- Joint Sim(3) pose-graph refinement when three or more verified views create
-  loop-closing constraints, plus cross-view depth artifact cleanup
+- Capture-set coverage gating before VGGT or SHARP: one verified geometric
+  core must contain at least half the supplied photos, so a small cluster of
+  repeated fixtures cannot masquerade as the requested room or building
+- EXIF-normalized VGGT shared-camera inference calibrated against measured
+  LucidFrame/SHARP constraints; the joint estimate is rejected when its camera
+  rotation disagrees with measured geometry
+- Correspondence-aware Sim(3) pose-graph refinement when three or more verified
+  views create loop-closing constraints; shared SHARP 3D inlier points remain
+  in the joint solve instead of being reduced to pair-transform summaries
+- Reciprocal dense-surface camera refinement after the verified SIFT/LoFTR
+  pose graph; it accepts only bounded camera changes that improve measured
+  depth agreement without degrading the original feature constraints
+- Source-ray footprint regularization that closes small observed pinholes by
+  growing only undersized tangent axes up to 15%, while preserving resolution,
+  Gaussian count, and the thin surface axis
+- Verified-overlap RGB calibration, cross-view depth artifact cleanup,
+  cross-view support measurement, and conservative single-axis needle
+  regularization with no Gaussian-count loss
 - Automatic VLM scene, room, doorway, and evidence-floor classification with
   unsupported floor claims forced back to unknown
-- Separate reconstruction jobs and floor/room entries for disconnected photo
-  groups that contain their own verified overlap
-- Strict street-number/address-term filtering before browser results can become
-  property evidence; Zillow and Redfin results remain link-only
+- GPU-safe reconstruction windows of at most 12 frames with three exact bridge
+  frames shared between adjacent windows
+- Separate room nodes for same-type rooms unless measured overlap joins them;
+  shared bridge frames link reconstruction segments
 - Byte-for-byte SHA-256 verification from the saved photo into LucidFrame
 - Multiple JPEG, PNG, or WebP uploads: up to 50 files and 1 GB total per batch
+- One manual whole-house capture workflow; plans, room photos, exterior views,
+  and unrelated media are separated before reconstruction
 - A full-detail navigable Rescue View with mouse, keyboard, wheel, on-screen
-  controls, and visible GPU reporting
+  controls, a non-overlapping room scene navigator, an always-visible
+  multi-view camera layout with calibrated source bookmarks, live FPS, visible
+  GPU reporting, measured
+  cross-view support, and an outside-capture warning
+- A separate, pannable and zoomable House Map that preserves the supplied plan
+  image and marks plan-linked scenes in green, position-unverified matches in
+  amber, and unavailable rooms in gray
+- Local YOLO26 Nano detection starts automatically over the live Rescue View,
+  with real 2D object boxes and clearly unverified tactical tags; rendered
+  frames stay on the local machine and the overlay can be switched off. The
+  official pretrained model is AGPL-3.0 (or requires an Ultralytics Enterprise
+  License), and its boxes are not persistent 3D hazard geometry
+- Artifact-local metric room/floor coordinates and conservative candidate
+  doorway, corridor, or stair edges
+- Photo-only observed-level separation from calibrated camera up vectors and
+  metric elevation; it labels `Observed level 0/1/...` without claiming a
+  ground floor or basement that the imagery does not verify
+- Hash-verified real-room reconstruction evaluators under `evaluation/`,
+  including a phone bedroom and three ETH3D room components
 - Saved-property deletion from both the home page and property page
 - One AI connection area for Groq, Cerebras, OpenRouter, or NVIDIA NIM
 - Server-side encrypted API keys and provider connection tests
 - Light and dark themes
+- A locked-down Electron/TypeScript desktop shell that requests the
+  high-performance GPU before Chromium starts
 
-AI is optional. Address lookup, maps, keyless online image search, uploads, and
-local reconstruction do not require an AI provider key.
+AI is optional. Address lookup, maps, uploads, geometric matching, and local
+reconstruction do not require an AI provider key. A vision-capable provider
+adds room, floor, doorway, corridor, stair, and outlier classification.
+
+Floorplans are optional. Without one, room and floor placement comes only from
+the measured camera path: keep 60-80% overlap, include 2-3 bridge views through
+every doorway, and photograph stairs continuously. Unseen rooms and missing
+connections remain unknown rather than being inferred from labels.
 
 ## Run
 
@@ -50,11 +94,24 @@ Requirements: Node.js 24+, Python 3.11+, an NVIDIA CUDA GPU, and the local
 ```powershell
 npm.cmd install
 Copy-Item .env.example .env
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
 python -m pip install -r services/reconstruction/requirements.txt
-npm.cmd run dev:full
+npm.cmd run desktop:dev
 ```
 
-Open [http://127.0.0.1:5173](http://127.0.0.1:5173).
+The StructureFirst desktop window opens after the worker, server, and renderer
+are ready. Use `npm.cmd run dev:full` only when a browser tab is useful for
+development.
+
+On this hybrid-GPU Windows laptop, apply the per-browser high-performance
+preference once and open an isolated RTX Rescue View:
+
+```powershell
+npm.cmd run rescue:rtx:configure
+npm.cmd run rescue:rtx
+```
 
 For the production build:
 
@@ -82,8 +139,8 @@ connection is activated. Provider quotas and availability can still change.
 Keys are encrypted in the local data directory and are never returned to the
 browser.
 
-Automatic online photo search needs no key. A Brave Search key is optional and
-can be added under **Optional Brave Search connection**.
+Online listing discovery is paused and hidden from the normal workflow. Its
+source-policy implementation remains in the repository for later work.
 
 Important `.env` values:
 
@@ -96,31 +153,52 @@ Important `.env` values:
 
 ## Better multi-photo results
 
-Upload adjacent views of the same space with roughly 60-80% visual overlap.
-StructureFirst sends up to 12 photos into one smart-connect job and keeps every
-uploaded photo in the property. Photos that cannot be matched are not silently
-treated as connected geometry. If disconnected photos form another internally
-verified overlap group, the backend queues that group as a separate room scene;
-isolated images are not reconstructed as a room.
+Choose **Whole house** and upload adjacent views in capture order with roughly
+60-80% visual overlap. Choose **180°** only for one 1:1 half-sphere
+equirectangular image, or **360°** for one 2:1 full-sphere equirectangular
+image. StructureFirst validates those layouts and preserves the original
+uploaded bytes; panorama reprojection and SHARP's normal model preprocessing
+occur inside LucidFrame.
+
+For canonical 1:1 half-sphere input, StructureFirst adapts only LucidFrame's
+in-process landscape guard so LucidFrame's existing partial-panorama normalizer
+can run. The LucidFrame repository, `reconstruct_sharp360` implementation, and
+official Apple SHARP checkpoint are not modified.
+
+StructureFirst keeps every uploaded photo. It naturally sorts filenames, then
+divides a large continuous capture walk into jobs of at most 12 frames. Adjacent
+jobs share three exact source frames so later house-level alignment has measured
+bridge evidence. Photos that cannot be matched are never silently treated as
+connected geometry. A disconnected subset with its own verified overlap is
+queued as a separate room scene; isolated images are not reconstructed as a
+room.
 
 The selector first forms a geometrically verified overlap core. DINOv2 scene
 descriptors and EXIF capture continuity may nominate another angle from the
-same room, but recognition never places that image. It enters the splat only
-when cross-image correspondences produce a stable transform in SHARP's metric
-geometry. A same-room image without enough overlap remains explicitly
-unregistered instead of being snapped onto similar walls or furniture.
-Unrelated room photos, objects, and animals remain excluded.
+same room, but recognition never places that image. VGGT then estimates all
+nominated cameras jointly from EXIF-normalized views. That shared solution can
+place a low-texture angle only after at least one verified image/SHARP metric
+edge calibrates the room scale and the joint camera rotations agree with the
+measured edge. Conflicting shared-camera estimates are rejected. Unrelated room
+photos, objects, and animals remain excluded.
 
 Rescue View represents only surfaces visible in the source images. It does not
 infer a collision-safe route or expose an unseen interior. To reconstruct an
 interior, capture each room and doorway with continuous overlap so the images
 form one connected visual path.
 
+The pinhole pass is not generative inpainting: it fills only sub-pixel gaps
+inside a source camera's measured footprint. Moving behind a bed, shelf, wall,
+or other occluder can still expose genuinely unseen space. Rescue View reports
+the fraction supported by another measured view and warns after the free camera
+moves far beyond the calibrated capture envelope.
+
 Rescue View displays the WebGL adapter it actually received. On a hybrid-GPU
-laptop, set the executable hosting StructureFirst under Windows **Settings >
-System > Display > Graphics** to **High performance**, restart it, and confirm
-that the badge names the discrete NVIDIA GPU. The web page requests a
-high-performance adapter but cannot override Windows' per-process assignment.
+laptop, `npm.cmd run rescue:rtx:configure` sets Windows' per-app preference for
+Chrome and Edge, while `npm.cmd run rescue:rtx` starts a separate Chrome profile
+with Chromium's high-performance GPU switch. Confirm that the in-view badge
+names the discrete NVIDIA GPU. The web page requests high performance but
+cannot override Windows' per-process adapter assignment by itself.
 
 ## Image-only scope
 
@@ -135,35 +213,30 @@ npm.cmd run check
 npm.cmd run test
 npm.cmd run build
 python -m pytest services/reconstruction
+python services/reconstruction/evaluate.py --manifest evaluation/datasets/bedroom-four-view.manifest.json --registration data/evaluation/bedroom-four-view-joint-v2/registration.json --verify-inputs
+python services/reconstruction/run_dataset.py --manifest evaluation/datasets/eth3d-door-seven-view.manifest.json --output data/evaluation/results/eth3d-door
 ```
 
-## Local browser agent (optional)
+## Paused online-discovery module
 
-StructureFirst can drive a **visible** local Chrome or Edge with your
-configured AI provider acting as the operator. When enabled under
-**Settings > Local browser agent**, pressing "Search" launches a headed
-browser, sends each step's screenshot plus a short list of interactive
-elements to the model, and executes one JSON action per turn (`goto`,
-`type`, `click`, `scroll`, `collect_image`, `done`, ...).
+StructureFirst retains the source-policy and visible-browser discovery code,
+but it is not started by the address pipeline and its controls are hidden. The
+manual capture workflow is the current product milestone.
 
 Requirements: a vision-capable model on the active AI provider, Chrome or
 Edge installed locally (or `STRUCTUREFIRST_BROWSER_EXECUTABLE` pointing at
 one), and a step budget between 4 and 60.
 
-Every image the agent collects is downloaded into the case directory and
-recorded with:
+Automatic listing-site collection remains paused while whole-house manual
+capture and reconstruction are evaluated.
 
-- `rights: "restricted"` and `redistributable: false`
-- provenance tags `automated-discovery`, `browser-agent`, `local-only`,
-  `not-redistributable`
-- the original page URL kept as `originUrl` and the direct image URL as
-  `downloadUrl`
-- a SHA-256 hash and the exact byte size
-
-These files stay on the machine that ran the agent, feed only the local
-LucidFrame reconstruction, and must not be exported or shared. If reuse is
-needed, replace the agent-collected image with an operator upload or a
-result from an open-license source (KartaView, Wikimedia, Openverse).
+The agent starts from several exact-address searches, clicks permitted source
+pages, and accepts a candidate only when the full-size image and exact address
+are both visible on that page. It cannot trust a model-supplied URL by itself.
+Unknown-rights candidates are retained as metadata links only. Image bytes are
+downloaded and passed to the VLM/LucidFrame pipeline only when source policy
+establishes an open or public-domain license; imported bytes retain their
+origin URL, license state, SHA-256 hash, and exact byte size.
 
 ## Source and model boundaries
 
@@ -171,10 +244,9 @@ result from an open-license source (KartaView, Wikimedia, Openverse).
   by default. StructureFirst's automatic collectors (KartaView, Wikimedia,
   Openverse, keyless Bing) do not crawl Zillow or Redfin or copy their listing
   media.
-- The optional local browser agent may download restricted images for
-  local-only reconstruction. Those files are flagged `rights: "restricted"`,
-  `redistributable: false`, and stay on the machine that captured them. Export
-  and sharing paths must honor those flags.
+- The local browser agent does not copy unknown-rights or restricted listing
+  images. Those discoveries remain address-check links and never enter
+  reconstruction. Export and sharing paths must honor those flags.
 - Only modification-safe public-domain and Creative Commons images are
   eligible for redistribution or reuse outside this machine. Automatic
   reconstruction additionally requires exact address text support or an

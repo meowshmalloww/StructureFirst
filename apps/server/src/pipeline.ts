@@ -14,7 +14,6 @@ import { EvidenceDiscoveryCoordinator } from "./discovery.js";
 import { CaseEventHub } from "./events.js";
 import { confidence } from "./lib/confidence.js";
 import { createId, nowIso } from "./lib/ids.js";
-import { classifySource } from "./lib/source-policy.js";
 import { discoverBuildingEvidence } from "./providers/brave.js";
 import { geocodeAddress } from "./providers/nominatim.js";
 import { findNearestBuilding } from "./providers/openstreetmap.js";
@@ -42,7 +41,7 @@ export class CasePipeline {
     private readonly events: CaseEventHub,
     private readonly config: AppConfig,
     private readonly dependencies: PipelineDependencies = defaultDependencies,
-    private readonly discovery?: EvidenceDiscoveryCoordinator,
+    _discovery?: EvidenceDiscoveryCoordinator,
     private readonly reconstruction?: ReconstructionCoordinator,
     private readonly sceneIntelligence?: SceneIntelligenceService,
   ) {}
@@ -259,91 +258,10 @@ export class CasePipeline {
       this.setStage(
         caseId,
         "evidence_discovery",
-        "running",
-        "Searching configured public discovery providers.",
+        "skipped",
+        "Online listing discovery is paused. Manual capture sets are the primary reconstruction input.",
+        0,
       );
-      let discoveredCount = 0;
-      if (this.discovery) {
-        const result = await this.discovery.discoverCase(caseId, {
-          includeOpenverse: true,
-          includeBrowser: true,
-          includeBrave: true,
-          includeBrowserAgent: false,
-        });
-        discoveredCount = result.added;
-        this.setStage(
-          caseId,
-          "evidence_discovery",
-          result.added > 0 ? "complete" : "limited",
-          result.added > 0
-            ? `Added ${result.added} review candidates from ${result.providers.join(", ") || "configured discovery"}.`
-            : (result.warnings[0] ??
-                "No discovery candidates matched this address."),
-          result.added,
-        );
-      } else if (this.config.braveApiKey) {
-        try {
-          const links = await this.dependencies.discover(
-            caseValue.displayAddress,
-            this.config.braveApiKey,
-          );
-          for (const link of links) {
-            const policy = classifySource(link.url);
-            const evidence: EvidenceAsset = {
-              id: createId("evidence"),
-              caseId,
-              title: link.title,
-              kind: link.kind,
-              sourceProvider: policy.provider,
-              originUrl: link.url,
-              ...(!policy.hardBlocked && link.thumbnailUrl
-                ? { thumbnailUrl: link.thumbnailUrl }
-                : {}),
-              discoveredAt: nowIso(),
-              rights: policy.rights,
-              cachePolicy: policy.cachePolicy,
-              redistributable: policy.redistributable,
-              validation: "reachable",
-              tags: ["automated-discovery"],
-              notes: `${link.notes} ${policy.reason}`,
-              confidence: confidence(
-                0.28,
-                "estimated",
-                "inferred",
-                "Search match only; address relevance and contents have not been visually confirmed.",
-                1,
-              ),
-            };
-            this.store.putEvidence(evidence);
-            discoveredCount += 1;
-          }
-          this.setStage(
-            caseId,
-            "evidence_discovery",
-            links.length > 0 ? "complete" : "limited",
-            links.length > 0
-              ? `Discovered ${links.length} candidate sources for review.`
-              : "The configured search returned no candidate sources.",
-            links.length,
-          );
-        } catch (error) {
-          this.setStage(
-            caseId,
-            "evidence_discovery",
-            "limited",
-            `Public discovery was unavailable: ${errorMessage(error)}`,
-            0,
-          );
-        }
-      } else {
-        this.setStage(
-          caseId,
-          "evidence_discovery",
-          "skipped",
-          "Brave Search is not configured. Building records and operator uploads remain available.",
-          0,
-        );
-      }
 
       this.setStage(
         caseId,
@@ -513,7 +431,6 @@ export class CasePipeline {
       });
 
       void buildingFound;
-      void discoveredCount;
     } catch (error) {
       const current = this.store.getCase(caseId);
       if (!current) return;

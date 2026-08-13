@@ -7,7 +7,9 @@ import {
   type EvidenceVisualAnalysis,
   type FloorHint,
   type ReconstructionArtifact,
+  type ReconstructionCameraPose,
   type RoomType,
+  type SpatialEdge,
   type SpatialNode,
 } from "@structurefirst/contracts";
 import sharp from "sharp";
@@ -44,6 +46,15 @@ const GeneratedVisualAnalysisSchema = z.object({
     "unknown",
   ]),
   floorHint: z.enum(["basement", "ground", "upper", "attic", "unknown"]),
+  floorNumber: z
+    .number()
+    .int()
+    .min(-5)
+    .max(200)
+    .nullable()
+    .optional()
+    .transform((value) => value ?? undefined),
+  roomLabels: z.array(z.string().trim().min(1).max(120)).max(40).default([]),
   propertyRelevance: z.enum(["likely", "unlikely", "unknown"]),
   observedAddress: z.string().trim().max(300).default(""),
   connections: z
@@ -104,31 +115,40 @@ export class SceneIntelligenceService {
           item.mimeType?.startsWith("image/") &&
           (force || !item.visualAnalysis),
       )
-      .slice(0, 12);
+      .slice(0, 50);
     const warnings: string[] = [];
     let analyzed = 0;
     let rejected = 0;
-    for (const evidence of candidates) {
-      try {
-        const analysis = await this.analyzeImage(
-          workspace.case.displayAddress,
-          workspace.case.addressInput,
-          evidence,
-          credential,
-        );
-        this.store.putEvidence(withVisualAnalysis(evidence, analysis));
-        analyzed += 1;
-        if (
-          analysis.sceneType === "non_property" ||
-          analysis.propertyRelevance === "unlikely" ||
-          analysis.addressMatch === "contradictory"
-        ) {
-          rejected += 1;
+    const queue = [...candidates];
+    const workers = Array.from(
+      { length: Math.min(4, queue.length) },
+      async () => {
+        while (queue.length) {
+          const evidence = queue.shift();
+          if (!evidence) return;
+          try {
+            const analysis = await this.analyzeImage(
+              workspace.case.displayAddress,
+              workspace.case.addressInput,
+              evidence,
+              credential,
+            );
+            this.store.putEvidence(withVisualAnalysis(evidence, analysis));
+            analyzed += 1;
+            if (
+              analysis.sceneType === "non_property" ||
+              analysis.propertyRelevance === "unlikely" ||
+              analysis.addressMatch === "contradictory"
+            ) {
+              rejected += 1;
+            }
+          } catch (error) {
+            warnings.push(`${evidence.title}: ${errorMessage(error)}`);
+          }
         }
-      } catch (error) {
-        warnings.push(`${evidence.title}: ${errorMessage(error)}`);
-      }
-    }
+      },
+    );
+    await Promise.all(workers);
     return {
       analyzed,
       rejected,
@@ -156,47 +176,102 @@ export class SceneIntelligenceService {
     }
 
     const seen = new Set<string>();
-    for (const artifact of workspace.artifacts.filter(
-      (item) => item.status === "ready",
-    )) {
+    const coveredEvidence = new Set<string>();
+    const allArtifactNodes: ArtifactSpatialNode[] = [];
+    const readyArtifacts = workspace.artifacts
+      .filter((item) => item.status === "ready")
+      .sort((left, right) => {
+        const coverageDifference =
+          connectedEvidenceIds(right, this.config.casesRoot).length -
+          connectedEvidenceIds(left, this.config.casesRoot).length;
+        return (
+          coverageDifference || right.updatedAt.localeCompare(left.updatedAt)
+        );
+      });
+    for (const artifact of readyArtifacts) {
       const evidenceIds = connectedEvidenceIds(artifact, this.config.casesRoot);
       const key = [...evidenceIds].sort().join("|");
-      if (!key || seen.has(key)) continue;
+      if (
+        !key ||
+        seen.has(key) ||
+        evidenceIds.every((id) => coveredEvidence.has(id))
+      ) {
+        continue;
+      }
       seen.add(key);
+      for (const id of evidenceIds) coveredEvidence.add(id);
       const evidence = evidenceIds
         .map((id) => workspace.evidence.find((item) => item.id === id))
         .filter((item): item is EvidenceAsset => Boolean(item));
-      const analyses = evidence
-        .map((item) => item.visualAnalysis)
-        .filter((item): item is EvidenceVisualAnalysis => Boolean(item));
-      const roomType = majority(
-        analyses.map((item) => item.roomType),
-        "unknown",
+      const poseByEvidence = new Map(
+        (artifact.geometry?.cameraPoses ?? []).map((pose) => [
+          pose.evidenceId,
+          pose.position,
+        ]),
       );
-      const floorHint = majority(
-        analyses.map((item) => item.floorHint),
-        "unknown",
+      const observedLevelByEvidence = inferObservedLevels(
+        artifact.geometry?.cameraPoses ?? [],
       );
-      const floor = floorPresentation(floorHint);
-      const node: SpatialNode = {
-        id: createId("node"),
-        caseId,
-        label: `${roomLabel(roomType)} · ${floor.floorLabel}`,
-        kind: spatialKind(roomType, analyses),
-        ...(floor.level === undefined ? {} : { level: floor.level }),
-        floorLabel: floor.floorLabel,
-        sourceIds: evidenceIds,
-        confidence: confidence(
-          artifact.registration?.confidenceScore ?? artifact.confidence.score,
-          "reconstructed",
-          "derived",
-          analyses.length
-            ? `Room and floor labels were inferred by a configured VLM; geometry includes only ${evidenceIds.length} registered source images.`
-            : `Geometry includes ${evidenceIds.length} registered source images; the room and floor remain unclassified.`,
-          evidenceIds.length,
-        ),
-      };
-      this.store.putNode(node);
+      const report = artifact.registration?.reportUrl
+        ? registrationReport(
+            artifact.registration.reportUrl,
+            this.config.casesRoot,
+          )
+        : undefined;
+      const groups = spatialEvidenceGroups(
+        evidence,
+        artifact.evidenceIds ?? [artifact.evidenceId],
+        report?.preflight?.acceptedPairs ?? [],
+        poseByEvidence,
+        observedLevelByEvidence,
+      );
+
+      const artifactNodes: ArtifactSpatialNode[] = [];
+      for (const group of groups) {
+        const floor = floorPresentation(group.floorHint, group.observedLevel);
+        const displayedFloor =
+          floor.floorLabel === "Unknown floor"
+            ? "Floor not verified"
+            : floor.floorLabel;
+        const position = centroid(group.positions);
+        const node: SpatialNode = {
+          id: createId("node"),
+          caseId,
+          artifactId: artifact.id,
+          coordinateFrameId: artifact.id,
+          label: `${roomLabel(group.roomType)} · ${displayedFloor}`,
+          kind: spatialKind(group.roomType, group.analyses),
+          roomType: group.roomType,
+          ...(floor.level === undefined ? {} : { level: floor.level }),
+          floorLabel: floor.floorLabel,
+          ...(position ? { position } : {}),
+          sourceIds: group.evidence.map((item) => item.id),
+          confidence: confidence(
+            artifact.registration?.confidenceScore ?? artifact.confidence.score,
+            "reconstructed",
+            "derived",
+            group.analyses.length
+              ? `Room labels were inferred from ${group.analyses.length} registered source ${group.analyses.length === 1 ? "view" : "views"}; the local position is derived from calibrated reconstruction cameras. Named floors require visible or plan evidence.`
+              : `Geometry includes ${group.evidence.length} registered source images; the room and floor remain unclassified.`,
+            group.evidence.length,
+          ),
+        };
+        this.store.putNode(node);
+        artifactNodes.push({
+          node,
+          ...(position ? { position } : {}),
+          connections: new Set(
+            group.analyses.flatMap((analysis) => analysis.connections),
+          ),
+        });
+      }
+      for (const edge of localRoomEdges(caseId, artifact, artifactNodes)) {
+        this.store.putEdge(edge);
+      }
+      allArtifactNodes.push(...artifactNodes);
+    }
+    for (const edge of crossArtifactBridgeEdges(caseId, allArtifactNodes)) {
+      this.store.putEdge(edge);
     }
   }
 
@@ -232,11 +307,13 @@ export class SceneIntelligenceService {
     };
     const system = [
       "You classify one property-evidence image for an emergency structure reconstruction system.",
-      "Return JSON only with sceneType, roomType, floorHint, propertyRelevance, observedAddress, connections, summary, confidenceScore.",
+      "Return JSON only with sceneType, roomType, floorHint, floorNumber, roomLabels, propertyRelevance, observedAddress, connections, summary, confidenceScore.",
       "Use only visible pixels and supplied metadata. Do not infer an exact address from visual similarity.",
       "sceneType is exterior|interior|floor_plan|non_property|unknown.",
       "roomType is bedroom|bathroom|kitchen|living_room|dining_room|office|garage|basement|attic|corridor|closet|stair|utility|exterior|unknown.",
+      "Classify only the visible space, not the filename or listing sequence. A room dominated by a washer, dryer, laundry sink, or utility equipment is utility, not kitchen. A patio, yard, facade, or deck is exterior even if it is described as outdoor living space.",
       "floorHint is basement|ground|upper|attic|unknown. Use unknown unless a floor is visibly supported.",
+      "For a floor plan, transcribe an explicitly printed floor number such as 1ST FLOOR PLAN as floorNumber=1 and list only visibly printed room names in roomLabels. Otherwise omit floorNumber and return an empty roomLabels array.",
       "propertyRelevance is unlikely for animals, objects, screenshots, unrelated scenes, or imagery that contradicts the metadata; otherwise likely or unknown.",
       "Only transcribe an address or house number that is actually visible. Otherwise observedAddress must be empty.",
       "connections may contain door, corridor, stair_up, stair_down, window.",
@@ -290,10 +367,10 @@ export class SceneIntelligenceService {
         generated = parseLabeledVisualAnalysis(content);
       }
     }
-    generated = {
+    generated = normalizeGeneratedScene({
       ...generated,
       floorHint: verifiedFloorHint(generated.floorHint, generated.summary),
-    };
+    });
     const observedAddress = normalizeObservedAddress(generated.observedAddress);
     const addressMatch = measuredAddressMatch(
       displayAddress,
@@ -338,12 +415,14 @@ export class SceneIntelligenceService {
             {
               role: "user",
               content: [
-                "Return sceneType, roomType, floorHint, propertyRelevance, observedAddress, connections, summary, confidenceScore.",
+                "Return sceneType, roomType, floorHint, floorNumber, roomLabels, propertyRelevance, observedAddress, connections, summary, confidenceScore.",
                 "Allowed values are the same as this example:",
                 JSON.stringify({
                   sceneType: "interior",
                   roomType: "bedroom",
                   floorHint: "unknown",
+                  floorNumber: null,
+                  roomLabels: [],
                   propertyRelevance: "likely",
                   observedAddress: "",
                   connections: ["door", "window"],
@@ -409,6 +488,17 @@ const NVIDIA_VISUAL_RESPONSE_FORMAT = {
           type: "string",
           enum: ["basement", "ground", "upper", "attic", "unknown"],
         },
+        floorNumber: {
+          anyOf: [
+            { type: "integer", minimum: -5, maximum: 200 },
+            { type: "null" },
+          ],
+        },
+        roomLabels: {
+          type: "array",
+          items: { type: "string" },
+          maxItems: 40,
+        },
         propertyRelevance: {
           type: "string",
           enum: ["likely", "unlikely", "unknown"],
@@ -429,6 +519,8 @@ const NVIDIA_VISUAL_RESPONSE_FORMAT = {
         "sceneType",
         "roomType",
         "floorHint",
+        "floorNumber",
+        "roomLabels",
         "propertyRelevance",
         "observedAddress",
         "connections",
@@ -440,15 +532,126 @@ const NVIDIA_VISUAL_RESPONSE_FORMAT = {
   },
 } as const;
 
+export function normalizeGeneratedScene(
+  generated: z.infer<typeof GeneratedVisualAnalysisSchema>,
+): z.infer<typeof GeneratedVisualAnalysisSchema> {
+  if (
+    generated.sceneType === "floor_plan" ||
+    generated.sceneType === "non_property"
+  ) {
+    return generated;
+  }
+  const definitiveIndoorRooms = new Set<RoomType>([
+    "bedroom",
+    "bathroom",
+    "kitchen",
+    "living_room",
+    "dining_room",
+    "office",
+    "garage",
+    "basement",
+    "attic",
+    "corridor",
+    "closet",
+    "stair",
+    "utility",
+  ]);
+  const summary = generated.summary.toLowerCase();
+  const inferredRoom = inferRoomFromSummary(summary);
+  const laundryVisible = /\b(?:washer|dryer|laundry|utility sink)\b/.test(
+    summary,
+  );
+  const kitchenVisible = /\b(?:oven|stove|cooktop|range|kitchen island)\b/.test(
+    summary,
+  );
+  const roomType: RoomType =
+    generated.roomType === "kitchen" && laundryVisible && !kitchenVisible
+      ? "utility"
+      : generated.roomType === "unknown" && inferredRoom
+        ? inferredRoom
+        : generated.roomType;
+  const sceneType =
+    roomType === "exterior"
+      ? "exterior"
+      : generated.sceneType === "exterior" &&
+          definitiveIndoorRooms.has(roomType)
+        ? "interior"
+        : definitiveIndoorRooms.has(roomType) &&
+            generated.sceneType === "unknown"
+          ? "interior"
+          : generated.sceneType;
+  const propertyRelevance =
+    generated.sceneType === "unknown" &&
+    generated.propertyRelevance === "unlikely" &&
+    inferredRoom
+      ? "likely"
+      : generated.propertyRelevance;
+  return { ...generated, roomType, sceneType, propertyRelevance };
+}
+
+function inferRoomFromSummary(summary: string): RoomType | undefined {
+  const matchesAtLeast = (terms: RegExp[], required: number) =>
+    terms.filter((term) => term.test(summary)).length >= required;
+  if (
+    /\bkitchen\b/.test(summary) &&
+    matchesAtLeast(
+      [
+        /\bstove\b/,
+        /\b(?:oven|cooktop|range)\b/,
+        /\bsink\b/,
+        /\brefrigerator\b/,
+        /\bcabinet/,
+        /\bisland\b/,
+      ],
+      2,
+    )
+  )
+    return "kitchen";
+  if (
+    /\bbathroom\b/.test(summary) &&
+    matchesAtLeast(
+      [/\btoilet\b/, /\bsink\b/, /\b(?:shower|tub|bathtub)\b/, /\bvanity\b/],
+      2,
+    )
+  )
+    return "bathroom";
+  if (
+    /\b(?:laundry|utility room)\b/.test(summary) &&
+    /\b(?:washer|dryer)\b/.test(summary)
+  )
+    return "utility";
+  if (/\bbedroom\b/.test(summary) && /\bbed\b/.test(summary)) return "bedroom";
+  if (
+    /\bliving room\b/.test(summary) &&
+    /\b(?:sofa|couch|coffee table|fireplace)\b/.test(summary)
+  )
+    return "living_room";
+  if (/\bdining room\b/.test(summary) && /\b(?:table|chair)\b/.test(summary))
+    return "dining_room";
+  if (
+    /\bgarage\b/.test(summary) &&
+    /\b(?:garage door|vehicle|car)\b/.test(summary)
+  )
+    return "garage";
+  if (/\b(?:hallway|corridor)\b/.test(summary) && /\bdoor/.test(summary))
+    return "corridor";
+  if (/\b(?:staircase|stairs|stairway)\b/.test(summary)) return "stair";
+  return undefined;
+}
+
 function withVisualAnalysis(
   evidence: EvidenceAsset,
   analysis: EvidenceVisualAnalysis,
 ): EvidenceAsset {
+  const locallyDetectedPlan = evidence.tags.includes("plan-candidate");
   const generatedTags = [
     "vlm-analyzed",
     `scene:${analysis.sceneType}`,
     `room:${analysis.roomType}`,
     `floor:${analysis.floorHint}`,
+    ...(analysis.floorNumber === undefined
+      ? []
+      : [`floor-number:${analysis.floorNumber}`]),
     `property-relevance:${analysis.propertyRelevance}`,
     `address-match:${analysis.addressMatch}`,
     ...analysis.connections.map((item) => `connection:${item}`),
@@ -462,12 +665,16 @@ function withVisualAnalysis(
   }
   return {
     ...evidence,
+    kind:
+      analysis.sceneType === "floor_plan" || locallyDetectedPlan
+        ? "blueprint"
+        : "image",
     visualAnalysis: analysis,
     tags: [
       ...new Set([
         ...evidence.tags.filter(
           (tag) =>
-            !/^(?:vlm-analyzed|scene:|room:|floor:|property-relevance:|address-match:|connection:|reconstruction-excluded)/.test(
+            !/^(?:vlm-analyzed|scene:|room:|floor:|floor-number:|property-relevance:|address-match:|connection:|reconstruction-excluded)/.test(
               tag,
             ),
         ),
@@ -486,6 +693,10 @@ function measuredAddressMatch(
   relevance: "likely" | "unlikely" | "unknown",
 ): EvidenceVisualAnalysis["addressMatch"] {
   if (relevance === "unlikely") return "contradictory";
+  // An operator explicitly assigned this file to the property. A VLM-only
+  // address transcription is not independent OCR evidence and must not
+  // silently override that assignment when the model hallucinates a number.
+  if (evidence.tags.includes("operator-upload")) return "possible";
   const expectedNumber =
     houseNumber(displayAddress) ?? houseNumber(submittedAddress);
   const observedNumber = houseNumber(observedAddress);
@@ -537,13 +748,31 @@ function connectedEvidenceIds(
 function registrationReport(
   reportUrl: string,
   casesRoot: string,
-): { connectedFrames?: unknown[] } | undefined {
+):
+  | {
+      connectedFrames?: unknown[];
+      preflight?: {
+        acceptedPairs?: Array<{
+          frameA?: unknown;
+          frameB?: unknown;
+          confidence?: unknown;
+        }>;
+      };
+    }
+  | undefined {
   if (!reportUrl.startsWith("/assets/")) return undefined;
   try {
     const suffix = decodeURIComponent(reportUrl.slice("/assets/".length));
     const path = resolve(casesRoot, suffix);
     return JSON.parse(readFileSync(path, "utf8")) as {
       connectedFrames?: unknown[];
+      preflight?: {
+        acceptedPairs?: Array<{
+          frameA?: unknown;
+          frameB?: unknown;
+          confidence?: unknown;
+        }>;
+      };
     };
   } catch {
     return undefined;
@@ -727,6 +956,242 @@ function token<const T extends readonly string[]>(
   return allowed.find((item) => normalized.includes(item)) ?? fallback;
 }
 
+type SpatialEvidenceGroup = {
+  roomType: RoomType;
+  floorHint: FloorHint;
+  observedLevel?: number;
+  evidence: EvidenceAsset[];
+  analyses: EvidenceVisualAnalysis[];
+  positions: Array<[number, number, number]>;
+};
+
+export function spatialEvidenceGroups(
+  evidence: EvidenceAsset[],
+  sourceOrder: string[],
+  acceptedPairs: Array<{
+    frameA?: unknown;
+    frameB?: unknown;
+    confidence?: unknown;
+  }>,
+  poseByEvidence: Map<string, [number, number, number]>,
+  observedLevelByEvidence = new Map<string, number>(),
+): SpatialEvidenceGroup[] {
+  const byId = new Map(evidence.map((item) => [item.id, item]));
+  const parent = new Map(evidence.map((item) => [item.id, item.id]));
+  const root = (id: string): string => {
+    const next = parent.get(id) ?? id;
+    if (next === id) return id;
+    const resolved = root(next);
+    parent.set(id, resolved);
+    return resolved;
+  };
+  const join = (leftId: string, rightId: string): void => {
+    const left = byId.get(leftId);
+    const right = byId.get(rightId);
+    if (
+      !left ||
+      !right ||
+      !sameObservedSpace(left, right, observedLevelByEvidence)
+    )
+      return;
+    const leftRoot = root(leftId);
+    const rightRoot = root(rightId);
+    if (leftRoot !== rightRoot) parent.set(rightRoot, leftRoot);
+  };
+
+  let measuredEdgeCount = 0;
+  for (const pair of acceptedPairs) {
+    if (!Number.isInteger(pair.frameA) || !Number.isInteger(pair.frameB)) {
+      continue;
+    }
+    const leftId = sourceOrder[Number(pair.frameA)];
+    const rightId = sourceOrder[Number(pair.frameB)];
+    if (!leftId || !rightId || !byId.has(leftId) || !byId.has(rightId)) {
+      continue;
+    }
+    measuredEdgeCount += 1;
+    join(leftId, rightId);
+  }
+
+  if (measuredEdgeCount === 0) {
+    const ordered = [...evidence].sort(
+      (left, right) =>
+        (left.capture?.captureOrder ?? Number.MAX_SAFE_INTEGER) -
+        (right.capture?.captureOrder ?? Number.MAX_SAFE_INTEGER),
+    );
+    for (let index = 1; index < ordered.length; index += 1) {
+      const left = ordered[index - 1]!;
+      const right = ordered[index]!;
+      const leftPosition = poseByEvidence.get(left.id);
+      const rightPosition = poseByEvidence.get(right.id);
+      if (!leftPosition || !rightPosition) continue;
+      const distance = Math.hypot(
+        leftPosition[0] - rightPosition[0],
+        leftPosition[1] - rightPosition[1],
+        leftPosition[2] - rightPosition[2],
+      );
+      if (distance <= 3) join(left.id, right.id);
+    }
+  }
+
+  const grouped = new Map<string, EvidenceAsset[]>();
+  for (const item of evidence) {
+    const groupRoot = root(item.id);
+    grouped.set(groupRoot, [...(grouped.get(groupRoot) ?? []), item]);
+  }
+  return [...grouped.values()].map((items) => {
+    const analyses = items
+      .map((item) => item.visualAnalysis)
+      .filter((item): item is EvidenceVisualAnalysis => Boolean(item));
+    const roomType = majority(
+      analyses
+        .map((item) => item.roomType)
+        .filter((item) => item !== "unknown"),
+      "unknown" as RoomType,
+    );
+    const floorHint = majority(
+      analyses
+        .map((item) => item.floorHint)
+        .filter((item) => item !== "unknown"),
+      "unknown" as FloorHint,
+    );
+    const observedLevels = items.flatMap((item) => {
+      const level = observedLevelByEvidence.get(item.id);
+      return level === undefined ? [] : [level];
+    });
+    return {
+      roomType,
+      floorHint,
+      ...(observedLevels.length
+        ? { observedLevel: numericMode(observedLevels) }
+        : {}),
+      evidence: items,
+      analyses,
+      positions: items.flatMap((item) => {
+        const position = poseByEvidence.get(item.id);
+        return position ? [position] : [];
+      }),
+    };
+  });
+}
+
+function sameObservedSpace(
+  left: EvidenceAsset,
+  right: EvidenceAsset,
+  observedLevelByEvidence: Map<string, number>,
+): boolean {
+  const leftRoom = left.visualAnalysis?.roomType ?? "unknown";
+  const rightRoom = right.visualAnalysis?.roomType ?? "unknown";
+  const leftFloor = left.visualAnalysis?.floorHint ?? "unknown";
+  const rightFloor = right.visualAnalysis?.floorHint ?? "unknown";
+  const roomCompatible =
+    leftRoom === "unknown" || rightRoom === "unknown" || leftRoom === rightRoom;
+  const floorCompatible =
+    leftFloor === "unknown" ||
+    rightFloor === "unknown" ||
+    leftFloor === rightFloor;
+  const leftLevel = observedLevelByEvidence.get(left.id);
+  const rightLevel = observedLevelByEvidence.get(right.id);
+  const observedLevelCompatible =
+    leftLevel === undefined ||
+    rightLevel === undefined ||
+    leftLevel === rightLevel;
+  return roomCompatible && floorCompatible && observedLevelCompatible;
+}
+
+function numericMode(values: number[]): number {
+  const counts = new Map<number, number>();
+  for (const value of values) counts.set(value, (counts.get(value) ?? 0) + 1);
+  return [...counts.entries()].sort(
+    (left, right) => right[1] - left[1] || left[0] - right[0],
+  )[0]![0];
+}
+
+export function inferObservedLevels(
+  poses: ReconstructionCameraPose[],
+): Map<string, number> {
+  const result = new Map<string, number>();
+  const finite = poses.filter(
+    (pose) =>
+      pose.position.every(Number.isFinite) &&
+      pose.rotationWxyz.every(Number.isFinite),
+  );
+  if (!finite.length) return result;
+
+  const referenceUp = rotateByQuaternion(finite[0]!.rotationWxyz, [0, -1, 0]);
+  const accumulatedUp = finite.reduce(
+    (sum, pose) => {
+      let up = rotateByQuaternion(pose.rotationWxyz, [0, -1, 0]);
+      if (dot(up, referenceUp) < 0) up = scaleVector(up, -1);
+      return addVectors(sum, up);
+    },
+    [0, 0, 0] as [number, number, number],
+  );
+  const length = Math.hypot(...accumulatedUp);
+  const up =
+    length > 1e-6 ? scaleVector(accumulatedUp, 1 / length) : referenceUp;
+  const elevations = finite.map((pose) => ({
+    id: pose.evidenceId,
+    elevation: dot(pose.position, up),
+  }));
+  const minimum = Math.min(...elevations.map((item) => item.elevation));
+  const maximum = Math.max(...elevations.map((item) => item.elevation));
+  const hasVerticalSeparation = maximum - minimum >= 2;
+  for (const item of elevations) {
+    result.set(
+      item.id,
+      hasVerticalSeparation
+        ? Math.max(0, Math.round((item.elevation - minimum) / 2.8))
+        : 0,
+    );
+  }
+  return result;
+}
+
+function rotateByQuaternion(
+  [w, x, y, z]: [number, number, number, number],
+  vector: [number, number, number],
+): [number, number, number] {
+  const quaternionVector: [number, number, number] = [x, y, z];
+  const twiceCross = scaleVector(cross(quaternionVector, vector), 2);
+  return addVectors(
+    vector,
+    addVectors(scaleVector(twiceCross, w), cross(quaternionVector, twiceCross)),
+  );
+}
+
+function cross(
+  left: [number, number, number],
+  right: [number, number, number],
+): [number, number, number] {
+  return [
+    left[1] * right[2] - left[2] * right[1],
+    left[2] * right[0] - left[0] * right[2],
+    left[0] * right[1] - left[1] * right[0],
+  ];
+}
+
+function dot(
+  left: [number, number, number],
+  right: [number, number, number],
+): number {
+  return left[0] * right[0] + left[1] * right[1] + left[2] * right[2];
+}
+
+function addVectors(
+  left: [number, number, number],
+  right: [number, number, number],
+): [number, number, number] {
+  return [left[0] + right[0], left[1] + right[1], left[2] + right[2]];
+}
+
+function scaleVector(
+  value: [number, number, number],
+  scale: number,
+): [number, number, number] {
+  return [value[0] * scale, value[1] * scale, value[2] * scale];
+}
+
 function majority<T extends string>(values: T[], fallback: T): T {
   if (!values.length) return fallback;
   const counts = new Map<T, number>();
@@ -737,7 +1202,196 @@ function majority<T extends string>(values: T[], fallback: T): T {
   );
 }
 
-function floorPresentation(floorHint: FloorHint): {
+function centroid(
+  positions: Array<[number, number, number]>,
+): [number, number, number] | undefined {
+  const finite = positions.filter((position) =>
+    position.every((value) => Number.isFinite(value)),
+  );
+  if (!finite.length) return undefined;
+  const sums = finite.reduce(
+    (sum, position) => [
+      sum[0] + position[0],
+      sum[1] + position[1],
+      sum[2] + position[2],
+    ],
+    [0, 0, 0] as [number, number, number],
+  );
+  return [
+    sums[0] / finite.length,
+    sums[1] / finite.length,
+    sums[2] / finite.length,
+  ];
+}
+
+type ArtifactSpatialNode = {
+  node: SpatialNode;
+  position?: [number, number, number];
+  connections: Set<EvidenceVisualAnalysis["connections"][number]>;
+};
+
+function crossArtifactBridgeEdges(
+  caseId: string,
+  nodes: ArtifactSpatialNode[],
+): SpatialEdge[] {
+  const edges: SpatialEdge[] = [];
+  const signatures = new Set<string>();
+  for (let leftIndex = 0; leftIndex < nodes.length; leftIndex += 1) {
+    const left = nodes[leftIndex]!;
+    if (!left.node.artifactId) continue;
+    const leftSources = new Set(left.node.sourceIds);
+    for (
+      let rightIndex = leftIndex + 1;
+      rightIndex < nodes.length;
+      rightIndex += 1
+    ) {
+      const right = nodes[rightIndex]!;
+      if (
+        !right.node.artifactId ||
+        right.node.artifactId === left.node.artifactId
+      ) {
+        continue;
+      }
+      const shared = right.node.sourceIds.filter((id) => leftSources.has(id));
+      if (!shared.length) continue;
+      const signature = [left.node.id, right.node.id].sort().join("|");
+      if (signatures.has(signature)) continue;
+      signatures.add(signature);
+      const connections = new Set([...left.connections, ...right.connections]);
+      const traversal = connections.has("stair_up")
+        ? "stair_up"
+        : connections.has("stair_down")
+          ? "stair_down"
+          : connections.has("door")
+            ? "door"
+            : "walk";
+      edges.push({
+        id: createId("edge"),
+        caseId,
+        from: left.node.id,
+        to: right.node.id,
+        traversal,
+        distanceMeters: 0.1,
+        blocked: false,
+        sourceIds: shared,
+        confidence: confidence(
+          0.82,
+          "verified",
+          "derived",
+          "These reconstruction segments share exact source frames. The bridge is verified, but each splat remains in its own local coordinate frame until house-level similarity alignment is complete.",
+          shared.length,
+        ),
+      });
+    }
+  }
+  return edges;
+}
+
+function localRoomEdges(
+  caseId: string,
+  artifact: ReconstructionArtifact,
+  nodes: Array<{
+    node: SpatialNode;
+    position?: [number, number, number];
+    connections: Set<EvidenceVisualAnalysis["connections"][number]>;
+  }>,
+): SpatialEdge[] {
+  const candidates: Array<{
+    left: (typeof nodes)[number];
+    right: (typeof nodes)[number];
+    distance: number;
+  }> = [];
+  for (let leftIndex = 0; leftIndex < nodes.length; leftIndex += 1) {
+    const left = nodes[leftIndex];
+    if (!left?.position) continue;
+    for (
+      let rightIndex = leftIndex + 1;
+      rightIndex < nodes.length;
+      rightIndex += 1
+    ) {
+      const right = nodes[rightIndex];
+      if (!right?.position) continue;
+      const semanticConnections = new Set([
+        ...left.connections,
+        ...right.connections,
+      ]);
+      if (
+        !["door", "corridor", "stair_up", "stair_down"].some((value) =>
+          semanticConnections.has(
+            value as EvidenceVisualAnalysis["connections"][number],
+          ),
+        )
+      ) {
+        continue;
+      }
+      const distance = Math.hypot(
+        left.position[0] - right.position[0],
+        left.position[1] - right.position[1],
+        left.position[2] - right.position[2],
+      );
+      if (distance <= 12) candidates.push({ left, right, distance });
+    }
+  }
+  candidates.sort((left, right) => left.distance - right.distance);
+  const parent = new Map(nodes.map((item) => [item.node.id, item.node.id]));
+  const root = (id: string): string => {
+    const next = parent.get(id) ?? id;
+    if (next === id) return id;
+    const resolved = root(next);
+    parent.set(id, resolved);
+    return resolved;
+  };
+  const edges: SpatialEdge[] = [];
+  for (const candidate of candidates) {
+    const leftRoot = root(candidate.left.node.id);
+    const rightRoot = root(candidate.right.node.id);
+    if (leftRoot === rightRoot) continue;
+    parent.set(leftRoot, rightRoot);
+    const semanticConnections = new Set([
+      ...candidate.left.connections,
+      ...candidate.right.connections,
+    ]);
+    const traversal = semanticConnections.has("stair_up")
+      ? "stair_up"
+      : semanticConnections.has("stair_down")
+        ? "stair_down"
+        : semanticConnections.has("door")
+          ? "door"
+          : "walk";
+    const sourceIds = [
+      ...new Set([
+        ...candidate.left.node.sourceIds,
+        ...candidate.right.node.sourceIds,
+      ]),
+    ];
+    edges.push({
+      id: createId("edge"),
+      caseId,
+      from: candidate.left.node.id,
+      to: candidate.right.node.id,
+      traversal,
+      distanceMeters: Math.max(0.1, candidate.distance),
+      blocked: false,
+      sourceIds,
+      confidence: confidence(
+        Math.min(
+          0.72,
+          artifact.registration?.confidenceScore ?? artifact.confidence.score,
+        ),
+        "estimated",
+        "derived",
+        "Candidate connection inferred inside one calibrated reconstruction frame from camera proximity plus a visible door, corridor, or stair. Verify before tactical use.",
+        sourceIds.length,
+      ),
+    });
+  }
+  return edges;
+}
+
+function floorPresentation(
+  floorHint: FloorHint,
+  observedLevel?: number,
+): {
   floorLabel: SpatialNode["floorLabel"];
   level?: number;
 } {
@@ -745,7 +1399,10 @@ function floorPresentation(floorHint: FloorHint): {
   if (floorHint === "ground") return { floorLabel: "Ground floor", level: 0 };
   if (floorHint === "upper") return { floorLabel: "Upper floor" };
   if (floorHint === "attic") return { floorLabel: "Attic" };
-  return { floorLabel: "Unknown floor" };
+  return {
+    floorLabel: "Unknown floor",
+    ...(observedLevel === undefined ? {} : { level: observedLevel }),
+  };
 }
 
 function verifiedFloorHint(

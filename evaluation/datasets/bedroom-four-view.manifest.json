@@ -1,0 +1,50 @@
+{
+  "schemaVersion": 1,
+  "id": "bedroom-four-view-phone-burst",
+  "description": "Four full-resolution responder phone captures turning around one real bedroom, including low-overlap blank-wall transitions.",
+  "rights": "local_operator_owned",
+  "inputRoot": "../../data/cases/case_6341db05d7b7445d89565f91a4e96101/uploads",
+  "frames": [
+    {
+      "index": 0,
+      "file": "upload_a84aef2031b24faf9487ec157651cbf3.jpg",
+      "sha256": "bb822d51e7372bc4cfa5673c04b67ea3b73fca81f829da841e10b0c363a25957",
+      "roomId": "bedroom-a",
+      "expectedRegistered": true
+    },
+    {
+      "index": 1,
+      "file": "upload_9b47d3745b454b81aa861cf519e284eb.jpg",
+      "sha256": "8445d22060b0ade1f571f9e22420983dfbdc8a9d0a43484ca7f995e425c5c850",
+      "roomId": "bedroom-a",
+      "expectedRegistered": true
+    },
+    {
+      "index": 2,
+      "file": "upload_16736b330de74f55a9bea21f35e885b2.jpg",
+      "sha256": "fc852d31bc08c36921dc6b83a0e8f1def04289638ac9e5fb96f23201633c01c1",
+      "roomId": "bedroom-a",
+      "expectedRegistered": true
+    },
+    {
+      "index": 3,
+      "file": "upload_2d4fd3f5d3b04a2697a310fa24525699.jpg",
+      "sha256": "83f47016f7bde3f760eaa64e9257a665f61943a0eba136c23318f71ee00af692",
+      "roomId": "bedroom-a",
+      "expectedRegistered": true
+    }
+  ],
+  "thresholds": {
+    "minimumRegistrationRecall": 1.0,
+    "minimumRegistrationPrecision": 1.0,
+    "maximumRotationAgreementMedianDegrees": 10.0,
+    "minimumGaussianCount": 4000000,
+    "requireJointCameraAcceptance": true,
+    "requirePoseGraphImprovement": true
+  },
+  "legacyBaseline": {
+    "connectedFrameCount": 2,
+    "frameCount": 4,
+    "gaussianCount": 2353448
+  }
+}

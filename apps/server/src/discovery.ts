@@ -55,7 +55,11 @@ export class EvidenceDiscoveryCoordinator {
     const existingUrls = new Set(
       this.store
         .listEvidence(caseId)
-        .flatMap((item) => (item.originUrl ? [item.originUrl] : [])),
+        .flatMap((item) =>
+          [item.originUrl, item.downloadUrl].filter((url): url is string =>
+            Boolean(url),
+          ),
+        ),
     );
     const providers: string[] = [];
     const warnings: string[] = [];
@@ -295,15 +299,11 @@ export class EvidenceDiscoveryCoordinator {
         for (const candidate of agentResult.candidates) {
           if (existingUrls.has(candidate.imageUrl)) continue;
           try {
-            const evidence = await this.importAgentImage(
-              caseId,
-              candidate,
-              queryAddress,
-            );
-            this.store.putEvidence(evidence);
+            const result = await this.recordAgentCandidate(caseId, candidate);
+            this.store.putEvidence(result.evidence);
             existingUrls.add(candidate.imageUrl);
             added += 1;
-            imported += 1;
+            if (result.imported) imported += 1;
           } catch (error) {
             warnings.push(
               `Browser agent: ${candidate.title} - ${errorMessage(error)}`,
@@ -311,8 +311,9 @@ export class EvidenceDiscoveryCoordinator {
           }
         }
         if (agentResult.reason !== "done") {
+          const lastDetail = agentResult.transcript.at(-1);
           warnings.push(
-            `Browser agent stopped early (${agentResult.reason}) after ${agentResult.steps} step(s).`,
+            `Browser agent stopped early (${agentResult.reason}) after ${agentResult.steps} step(s).${lastDetail ? ` ${lastDetail}` : ""}`,
           );
         }
       } catch (error) {
@@ -421,16 +422,59 @@ export class EvidenceDiscoveryCoordinator {
     });
   }
 
-  // The browser agent visits pages whose imagery has no established reuse
-  // license. Bytes are pulled solely for local StructureFirst reconstruction:
-  // the resulting EvidenceAsset is marked rights=restricted, redistributable
-  // is false, and Rescue View export paths must honor that. The saved copy
-  // stays inside the case directory next to operator uploads.
-  private async importAgentImage(
+  // A browser agent may inspect any permitted public page, but bytes are only
+  // retained when the source policy establishes an open/public license.
+  // Unknown-rights candidates remain provenance-rich metadata links.
+  private async recordAgentCandidate(
     caseId: string,
     candidate: BrowserAgentCandidate,
-    queryAddress: string,
-  ): Promise<EvidenceAsset> {
+  ): Promise<{ evidence: EvidenceAsset; imported: boolean }> {
+    if (!candidate.addressMatched)
+      throw new Error(
+        "The source page did not independently match the address.",
+      );
+
+    const sourcePolicy = classifySource(candidate.sourceUrl);
+    const sourceHost = safeHostname(candidate.sourceUrl);
+    const canImport =
+      !sourcePolicy.hardBlocked &&
+      sourcePolicy.cachePolicy === "local_allowed" &&
+      ["open_license", "public_domain"].includes(sourcePolicy.rights);
+
+    if (!canImport) {
+      return {
+        imported: false,
+        evidence: {
+          id: createId("evidence"),
+          caseId,
+          title: candidate.title,
+          kind: "image",
+          sourceProvider: `Browser agent · ${sourcePolicy.provider}`,
+          originUrl: candidate.sourceUrl,
+          downloadUrl: candidate.imageUrl,
+          discoveredAt: nowIso(),
+          rights: sourcePolicy.rights,
+          cachePolicy: sourcePolicy.cachePolicy,
+          redistributable: false,
+          validation: "reachable",
+          tags: [
+            "automated-discovery",
+            "browser-agent",
+            "address-text-match",
+            "metadata-only",
+          ],
+          notes: `The agent visibly located a property image on an address-matched page at ${sourceHost}. Agent rationale: ${candidate.why}. ${sourcePolicy.reason} No image bytes were copied and this link is excluded from reconstruction.`,
+          confidence: confidence(
+            0.46,
+            "estimated",
+            "observed",
+            "The image and exact address were visible on the source page, but media reuse rights were not established.",
+            1,
+          ),
+        },
+      };
+    }
+
     const response = await safeRemoteFetch(candidate.imageUrl);
     const mimeType = (response.headers.get("content-type") ?? "")
       .split(";", 1)[0]
@@ -452,48 +496,43 @@ export class EvidenceDiscoveryCoordinator {
     const outputPath = resolve(directory, name);
     writeFileSync(outputPath, bytes, { flag: "wx" });
 
-    const sourceHost = safeHostname(candidate.sourceUrl);
-    const addressMatched = addressTextMatch(
-      queryAddress,
-      candidate.title,
-      candidate.sourceUrl,
-      candidate.why,
-    );
-
     return {
-      id: createId("evidence"),
-      caseId,
-      title: candidate.title,
-      kind: "image",
-      sourceProvider: `Browser agent · ${sourceHost}`,
-      originUrl: candidate.sourceUrl,
-      downloadUrl: candidate.imageUrl,
-      discoveredAt: nowIso(),
-      rights: "restricted",
-      cachePolicy: "local_allowed",
-      redistributable: false,
-      validation: "automated_imported",
-      localUrl: `/assets/${caseId}/uploads/${name}`,
-      mimeType,
-      byteSize: bytes.byteLength,
-      sha256: createHash("sha256").update(bytes).digest("hex"),
-      tags: [
-        "automated-discovery",
-        "browser-agent",
-        "local-only",
-        "not-redistributable",
-        ...(addressMatched
-          ? ["address-text-match"]
-          : ["address-relevance-unverified"]),
-      ],
-      notes: `Collected by the local browser agent from ${sourceHost}. Agent rationale: ${candidate.why}. Rights status is restricted: the file is kept only for local StructureFirst reconstruction and must not be redistributed. Address relevance still requires visual confirmation.`,
-      confidence: confidence(
-        addressMatched ? 0.4 : 0.28,
-        "estimated",
-        "inferred",
-        "Browser-agent capture; visual match to the target address requires operator confirmation.",
-        1,
-      ),
+      imported: true,
+      evidence: {
+        id: createId("evidence"),
+        caseId,
+        title: candidate.title,
+        kind: "image",
+        sourceProvider: `Browser agent · ${sourcePolicy.provider}`,
+        originUrl: candidate.sourceUrl,
+        downloadUrl: candidate.imageUrl,
+        discoveredAt: nowIso(),
+        rights: sourcePolicy.rights,
+        cachePolicy: "local_allowed",
+        redistributable: sourcePolicy.redistributable,
+        validation: "automated_imported",
+        localUrl: `/assets/${caseId}/uploads/${name}`,
+        mimeType,
+        byteSize: bytes.byteLength,
+        sha256: createHash("sha256").update(bytes).digest("hex"),
+        tags: [
+          "automated-discovery",
+          "browser-agent",
+          "automatic-import",
+          "address-text-match",
+          sourcePolicy.rights === "public_domain"
+            ? "public-domain"
+            : "open-license",
+        ],
+        notes: `The agent located this image on an address-matched page at ${sourceHost}. Agent rationale: ${candidate.why}. ${sourcePolicy.reason} Provenance and reuse status remain attached.`,
+        confidence: confidence(
+          0.56,
+          "estimated",
+          "observed",
+          "The exact address and image were observed on the source page; visual property identity is checked again before reconstruction.",
+          1,
+        ),
+      },
     };
   }
 }

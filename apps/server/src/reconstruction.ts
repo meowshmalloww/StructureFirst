@@ -3,11 +3,14 @@ import { createReadStream, readFileSync } from "node:fs";
 import { relative, resolve } from "node:path";
 import {
   type Case,
+  type CaptureSetPlan,
   type EvidenceAsset,
   type PipelineEvent,
   type PipelineStageName,
   type MultiReconstructionRequest,
   type ReconstructionArtifact,
+  type ReconstructionGeometry,
+  type ReconstructionQuality,
   type ReconstructionRequest,
   type StageStatus,
 } from "@structurefirst/contracts";
@@ -15,12 +18,14 @@ import type { AppConfig } from "./config.js";
 import { CaseEventHub } from "./events.js";
 import { confidence } from "./lib/confidence.js";
 import { createId, nowIso } from "./lib/ids.js";
+import { planCaptureSet } from "./capture-plan.js";
 import { StructureStore } from "./store.js";
 
 type WorkerJob = {
   job_id: string;
   status: "queued" | "running" | "ready" | "failed";
   splat_url?: string;
+  structural_model_url?: string;
   manifest_url?: string;
   gaussian_count?: number;
   registration_report_url?: string;
@@ -68,6 +73,28 @@ export class ReconstructionCoordinator {
     }
   }
 
+  async detectFrame(input: {
+    imageDataUrl: string;
+    scoreThreshold?: number | undefined;
+  }): Promise<unknown> {
+    const response = await fetch(`${this.config.reconstructionUrl}/detect-frame`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        image_data_url: input.imageDataUrl,
+        score_threshold: input.scoreThreshold ?? 0.34,
+      }),
+      signal: AbortSignal.timeout(15_000),
+    });
+    if (!response.ok) {
+      const detail = await response.text();
+      throw new Error(
+        `Local detector returned ${response.status}: ${detail.slice(0, 300)}`,
+      );
+    }
+    return response.json();
+  }
+
   async queueAvailable(
     caseId: string,
     preferredEvidenceIds?: string[],
@@ -104,6 +131,158 @@ export class ReconstructionCoordinator {
     });
   }
 
+  async queueCaptureSet(
+    caseId: string,
+    evidenceIds: string[],
+  ): Promise<{
+    artifacts: ReconstructionArtifact[];
+    plan: CaptureSetPlan;
+  }> {
+    const selected = new Set(evidenceIds);
+    const evidence = this.store
+      .listEvidence(caseId)
+      .filter((item) => selected.has(item.id));
+    const plan = planCaptureSet(evidence);
+    const artifacts: ReconstructionArtifact[] = [];
+    for (const batch of plan.batches) {
+      if (batch.evidenceIds.length === 1) {
+        artifacts.push(
+          await this.queue(caseId, {
+            evidenceId: batch.evidenceIds[0]!,
+            mode: "single_image",
+          }),
+        );
+      } else {
+        artifacts.push(
+          await this.queueMulti(caseId, { evidenceIds: batch.evidenceIds }),
+        );
+      }
+    }
+    return { artifacts, plan };
+  }
+
+  async queueFloorPlans(
+    caseId: string,
+    evidenceIds: string[],
+  ): Promise<ReconstructionArtifact> {
+    const uniqueIds = [...new Set(evidenceIds)];
+    if (uniqueIds.length === 0 || uniqueIds.length > 12)
+      throw new Error("Select between one and twelve floorplans.");
+    const evidence = uniqueIds
+      .map((id) => this.store.getEvidence(id))
+      .filter((item): item is EvidenceAsset => Boolean(item));
+    if (
+      evidence.length !== uniqueIds.length ||
+      evidence.some(
+        (item) =>
+          item.caseId !== caseId || !item.mimeType?.startsWith("image/"),
+      )
+    ) {
+      throw new Error("Every floorplan must be a local image in this case.");
+    }
+    const ordered = [...evidence].sort((left, right) => {
+      const leftFloor = left.visualAnalysis?.floorNumber;
+      const rightFloor = right.visualAnalysis?.floorNumber;
+      if (leftFloor !== undefined && rightFloor !== undefined)
+        return leftFloor - rightFloor;
+      if (leftFloor !== undefined) return -1;
+      if (rightFloor !== undefined) return 1;
+      return (
+        (left.capture?.captureOrder ?? 0) - (right.capture?.captureOrder ?? 0)
+      );
+    });
+    const inputPaths = ordered.map((item) => this.localInputPath(item));
+    if (inputPaths.some((path) => !path))
+      throw new Error("Every floorplan must be locally available.");
+    const verifiedPaths = inputPaths as string[];
+    const inputSha256s = await Promise.all(
+      ordered.map(
+        async (item, index) =>
+          item.sha256 ?? (await sha256File(verifiedPaths[index]!)),
+      ),
+    );
+    const id = createId("artifact");
+    const now = nowIso();
+    const artifact: ReconstructionArtifact = {
+      id,
+      caseId,
+      evidenceId: ordered[0]!.id,
+      evidenceIds: ordered.map((item) => item.id),
+      status: "queued",
+      mode: "floorplan",
+      modelName: "StructureFirst plan vectorizer",
+      modelLicense: "StructureFirst Apache-2.0 code; operator-supplied plans",
+      createdAt: now,
+      updatedAt: now,
+      confidence: confidence(
+        0,
+        "unknown",
+        "unknown",
+        "Floorplan lines have not been vectorized yet.",
+        ordered.length,
+      ),
+    };
+    this.store.putArtifact(artifact);
+    this.updateWorkflow(
+      caseId,
+      "reconstruction",
+      "running",
+      `Vectorizing walls and floor plates from ${ordered.length} floorplan ${ordered.length === 1 ? "image" : "images"}.`,
+    );
+    try {
+      const response = await fetch(`${this.config.reconstructionUrl}/jobs`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          job_id: id,
+          case_id: caseId,
+          evidence_id: ordered[0]!.id,
+          evidence_ids: ordered.map((item) => item.id),
+          input_path: verifiedPaths[0],
+          input_paths: verifiedPaths,
+          input_sha256: inputSha256s[0],
+          input_sha256s: inputSha256s,
+          floor_numbers: ordered.map(
+            (item, index) => item.visualAnalysis?.floorNumber ?? index + 1,
+          ),
+          mode: "floorplan",
+        }),
+        signal: AbortSignal.timeout(10_000),
+      });
+      if (!response.ok) {
+        const message = await response.text();
+        throw new Error(
+          `Structural worker returned ${response.status}: ${message.slice(0, 300)}`,
+        );
+      }
+      const updated = this.store.putArtifact({
+        ...artifact,
+        status: "running",
+        updatedAt: nowIso(),
+      });
+      this.schedulePoll(updated.id, 0);
+      return updated;
+    } catch (error) {
+      const failed = this.store.putArtifact({
+        ...artifact,
+        status: "failed",
+        error: errorMessage(error),
+        updatedAt: nowIso(),
+      });
+      this.updateWorkflow(
+        caseId,
+        "reconstruction",
+        "failed",
+        `Floorplan vectorization could not start: ${errorMessage(error)}`,
+      );
+      return failed;
+    }
+  }
+
+  reportWorkflow(caseId: string, status: StageStatus, message: string): void {
+    this.updateWorkflow(caseId, "reconstruction", status, message);
+  }
+
   async queue(
     caseId: string,
     request: ReconstructionRequest,
@@ -130,6 +309,7 @@ export class ReconstructionCoordinator {
       id,
       caseId,
       evidenceId: evidence.id,
+      evidenceIds: [evidence.id],
       status: "queued",
       mode: request.mode,
       modelName:
@@ -310,11 +490,40 @@ export class ReconstructionCoordinator {
 
   resumePending(): void {
     for (const caseValue of this.store.listCases()) {
-      for (const artifact of this.store.listArtifacts(caseValue.id)) {
+      const artifacts = this.store.listArtifacts(caseValue.id);
+      const pending = artifacts.filter(
+        (artifact) =>
+          artifact.status === "queued" || artifact.status === "running",
+      );
+      for (const artifact of pending) {
         if (artifact.status === "queued" || artifact.status === "running") {
           this.schedulePoll(artifact.id, 0);
         }
       }
+      if (pending.length) continue;
+      const ready = artifacts.filter((artifact) => artifact.status === "ready");
+      if (!ready.length) continue;
+      const failed = artifacts.filter(
+        (artifact) => artifact.status === "failed",
+      );
+      const gaussianLayers = ready.filter(
+        (artifact) => artifact.mode !== "floorplan",
+      ).length;
+      const planLayers = ready.length - gaussianLayers;
+      this.updateWorkflow(
+        caseValue.id,
+        "reconstruction",
+        failed.length ? "limited" : "complete",
+        `${gaussianLayers} verified Gaussian ${
+          gaussianLayers === 1 ? "scene is" : "scenes are"
+        } ready${planLayers ? ` with ${planLayers} structural plan layer` : ""}${
+          planLayers === 1 ? "" : planLayers > 1 ? "s" : ""
+        }.${
+          failed.length
+            ? ` ${failed.length} disconnected capture ${failed.length === 1 ? "group was" : "groups were"} left unplaced.`
+            : ""
+        }`,
+      );
     }
   }
 
@@ -340,7 +549,7 @@ export class ReconstructionCoordinator {
       return;
     }
     if (attempt > 1_200) {
-      this.failArtifact(
+      await this.failArtifact(
         artifact,
         "Reconstruction exceeded the one-hour monitoring window.",
       );
@@ -362,7 +571,7 @@ export class ReconstructionCoordinator {
         throw new Error(`Worker status returned ${response.status}.`);
       const job = (await response.json()) as WorkerJob;
       if (job.status === "failed") {
-        this.failArtifact(
+        await this.failArtifact(
           artifact,
           job.error ?? "LucidFrame reconstruction failed.",
           job,
@@ -380,16 +589,48 @@ export class ReconstructionCoordinator {
         this.schedulePoll(artifactId, attempt + 1);
         return;
       }
-      if (!job.splat_url || !job.manifest_url) {
-        throw new Error("Worker completed without a splat and manifest URL.");
-      }
+      if (!job.manifest_url)
+        throw new Error("Worker completed without a manifest URL.");
+      if (artifact.mode === "floorplan" && !job.structural_model_url)
+        throw new Error("Worker completed without a structural model URL.");
+      if (artifact.mode !== "floorplan" && !job.splat_url)
+        throw new Error("Worker completed without a splat URL.");
+      const registrationReport = job.registration_report_url
+        ? readRegistrationReport(
+            job.registration_report_url,
+            this.config.casesRoot,
+          )
+        : undefined;
+      const geometry = reconstructionGeometry(
+        artifact,
+        job,
+        registrationReport,
+        this.store,
+      );
+      const quality = reconstructionQuality(artifact, job, registrationReport);
 
       const ready: ReconstructionArtifact = {
         ...artifact,
         status: "ready",
-        splatUrl: job.splat_url,
+        ...(job.splat_url ? { splatUrl: job.splat_url } : {}),
+        ...(job.structural_model_url
+          ? { structuralModelUrl: job.structural_model_url }
+          : {}),
         manifestUrl: job.manifest_url,
         ...(job.gaussian_count ? { gaussianCount: job.gaussian_count } : {}),
+        ...(artifact.mode === "floorplan"
+          ? {
+              geometry: {
+                backend: "floorplan_vector_extrusion" as const,
+                coordinateFrame: "floorplan_metric_y_up" as const,
+                jointCameraAccepted: false,
+                cameraPoses: [],
+              },
+            }
+          : geometry
+            ? { geometry }
+            : {}),
+        ...(quality ? { quality } : {}),
         ...(artifact.mode === "multi_image" && job.registration_status
           ? {
               registration: {
@@ -422,21 +663,32 @@ export class ReconstructionCoordinator {
           : {}),
         updatedAt: nowIso(),
         confidence: confidence(
-          job.fallback_used
-            ? 0.52
-            : artifact.mode === "multi_image"
-              ? Math.min(0.68, 0.35 + (job.registration_confidence ?? 0) * 0.33)
-              : 0.58,
+          artifact.mode === "floorplan"
+            ? 0.64
+            : job.fallback_used
+              ? 0.52
+              : artifact.mode === "multi_image"
+                ? Math.min(
+                    0.68,
+                    0.35 + (job.registration_confidence ?? 0) * 0.33,
+                  )
+                : 0.58,
           "reconstructed",
           "derived",
-          job.fallback_used
-            ? "The photographs did not register, so LucidFrame reconstructed a nearby view from the first exact source image. Occluded space remains unknown."
-            : artifact.mode === "multi_image"
-              ? "LucidFrame reconstructed and registered only photographs with measured visual and metric overlap. Occluded space remains unknown."
-              : "LucidFrame reconstructed nearby appearance from the selected image. Occluded and unseen space remains unknown.",
-          job.fallback_used
-            ? 1
-            : (job.connected_frame_count ?? artifact.evidenceIds?.length ?? 1),
+          artifact.mode === "floorplan"
+            ? "Arbitrary-angle wall candidates and room polygons were extracted from the exact supplied plan ink. Scale, wall height, openings, and stairs remain unverified; unobserved roof geometry is omitted."
+            : job.fallback_used
+              ? "The photographs did not register, so LucidFrame reconstructed a nearby view from the first exact source image. Occluded space remains unknown."
+              : artifact.mode === "multi_image"
+                ? "LucidFrame reconstructed and registered only photographs with measured visual and metric overlap. Occluded space remains unknown."
+                : "LucidFrame reconstructed nearby appearance from the selected image. Occluded and unseen space remains unknown.",
+          artifact.mode === "floorplan"
+            ? (artifact.evidenceIds?.length ?? 1)
+            : job.fallback_used
+              ? 1
+              : (job.connected_frame_count ??
+                artifact.evidenceIds?.length ??
+                1),
         ),
       };
       this.store.putArtifact(ready);
@@ -444,7 +696,7 @@ export class ReconstructionCoordinator {
       await this.applyReadyCoverage(ready);
     } catch (error) {
       if (attempt >= 10) {
-        this.failArtifact(
+        await this.failArtifact(
           artifact,
           `Worker became unreachable: ${errorMessage(error)}`,
         );
@@ -463,9 +715,13 @@ export class ReconstructionCoordinator {
     const groupedEvidence = (artifact.evidenceIds ?? [artifact.evidenceId])
       .map((id) => this.store.getEvidence(id))
       .filter((item): item is EvidenceAsset => Boolean(item));
-    const isInterior = groupedEvidence.some((item) =>
-      item.tags.includes("interior"),
-    );
+    const isInterior =
+      artifact.mode === "floorplan" ||
+      groupedEvidence.some(
+        (item) =>
+          item.tags.includes("interior") ||
+          item.tags.includes("scene:interior"),
+      );
     const sourceCount = artifact.fallback
       ? 1
       : (artifact.registration?.connectedFrameCount ?? 1);
@@ -474,14 +730,18 @@ export class ReconstructionCoordinator {
       ...(isInterior
         ? {
             interior: confidence(
-              artifact.mode === "multi_image" && !artifact.fallback
-                ? 0.56
-                : 0.42,
+              artifact.mode === "floorplan"
+                ? 0.64
+                : artifact.mode === "multi_image" && !artifact.fallback
+                  ? 0.56
+                  : 0.42,
               "reconstructed",
               "derived",
-              artifact.mode === "multi_image" && !artifact.fallback
-                ? `${sourceCount} overlapping interior captures were registered; room topology beyond observed overlap remains unknown.`
-                : "A nearby-view splat exists for one interior image; room topology and occluded space remain unknown.",
+              artifact.mode === "floorplan"
+                ? `${groupedEvidence.length} supplied plan sheets were classified and vectorized; multi-level sheets are separated, site plans are references rather than floors, and height, scale, openings, stairs, and inter-floor alignment remain unverified.`
+                : artifact.mode === "multi_image" && !artifact.fallback
+                  ? `${sourceCount} overlapping interior captures were registered; room topology beyond observed overlap remains unknown.`
+                  : "A nearby-view splat exists for one interior image; room topology and occluded space remain unknown.",
               sourceCount,
             ),
           }
@@ -510,54 +770,64 @@ export class ReconstructionCoordinator {
       artifact.caseId,
       "reconstruction",
       "complete",
-      artifact.fallback
-        ? `The photographs did not register; LucidFrame still produced ${artifact.gaussianCount?.toLocaleString() ?? "a"} Gaussians from the first exact source image.`
-        : artifact.mode === "multi_image"
-          ? `LucidFrame connected ${sourceCount}/${artifact.evidenceIds?.length ?? sourceCount} captures and produced ${artifact.gaussianCount?.toLocaleString() ?? "a"} Gaussians.`
-          : `LucidFrame produced ${artifact.gaussianCount?.toLocaleString() ?? "a"} Gaussian scene. Nearby-view limitations apply.`,
+      artifact.mode === "floorplan"
+        ? `Built a navigable structural model from ${groupedEvidence.length} supplied plan ${groupedEvidence.length === 1 ? "sheet" : "sheets"}. Floor count comes from labels inside the sheets; site plans remain reference evidence.`
+        : artifact.fallback
+          ? `The photographs did not register; LucidFrame still produced ${artifact.gaussianCount?.toLocaleString() ?? "a"} Gaussians from the first exact source image.`
+          : artifact.mode === "multi_image"
+            ? `LucidFrame connected ${sourceCount}/${artifact.evidenceIds?.length ?? sourceCount} captures and produced ${artifact.gaussianCount?.toLocaleString() ?? "a"} Gaussians.`
+            : `LucidFrame produced ${artifact.gaussianCount?.toLocaleString() ?? "a"} Gaussian scene. Nearby-view limitations apply.`,
     );
     await this.onReady?.(artifact);
-    await this.queueNextVerifiedComponent(artifact);
+    await this.queueRemainingCoverage(artifact, false);
   }
 
-  private async queueNextVerifiedComponent(
+  private async queueRemainingCoverage(
     artifact: ReconstructionArtifact,
+    includeEveryInput: boolean,
   ): Promise<void> {
     if (artifact.mode !== "multi_image" || !artifact.evidenceIds) return;
     const reportUrl = artifact.registration?.reportUrl;
     if (!reportUrl) return;
     const report = readRegistrationReport(reportUrl, this.config.casesRoot);
-    const frameGroup = nextVerifiedFrameGroup(report);
-    if (!frameGroup) return;
-    const evidenceIds = frameGroup
-      .map((index) => artifact.evidenceIds?.[index])
-      .filter((id): id is string => Boolean(id))
-      .filter((id) => {
-        const evidence = this.store.getEvidence(id);
-        return Boolean(
-          evidence && !evidence.tags.includes("reconstruction-excluded"),
-        );
-      });
-    if (evidenceIds.length < 2) return;
-    const signature = evidenceSignature(evidenceIds);
-    const alreadyQueued = this.store
-      .listArtifacts(artifact.caseId)
-      .some(
-        (candidate) =>
-          candidate.id !== artifact.id &&
-          candidate.evidenceIds &&
-          evidenceSignature(candidate.evidenceIds) === signature,
-      );
-    if (alreadyQueued) return;
-    await this.queueMulti(artifact.caseId, { evidenceIds });
+    const frameGroups = coverageFrameGroups(
+      report,
+      artifact.evidenceIds.length,
+      includeEveryInput,
+    );
+    const covered = representedEvidenceIds(
+      this.store.listArtifacts(artifact.caseId),
+    );
+    for (const frameGroup of frameGroups) {
+      const evidenceIds = frameGroup
+        .map((index) => artifact.evidenceIds?.[index])
+        .filter((id): id is string => Boolean(id))
+        .filter((id) => {
+          const evidence = this.store.getEvidence(id);
+          return Boolean(
+            evidence && !evidence.tags.includes("reconstruction-excluded"),
+          );
+        })
+        .filter((id) => !covered.has(id));
+      if (evidenceIds.length === 0) continue;
+      for (const id of evidenceIds) covered.add(id);
+      if (evidenceIds.length === 1) {
+        await this.queue(artifact.caseId, {
+          evidenceId: evidenceIds[0]!,
+          mode: "single_image",
+        });
+      } else {
+        await this.queueMulti(artifact.caseId, { evidenceIds });
+      }
+    }
   }
 
-  private failArtifact(
+  private async failArtifact(
     artifact: ReconstructionArtifact,
     message: string,
     job?: WorkerJob,
-  ): void {
-    this.store.putArtifact({
+  ): Promise<void> {
+    const failed = this.store.putArtifact({
       ...artifact,
       status: "failed",
       error: message,
@@ -579,7 +849,20 @@ export class ReconstructionCoordinator {
       updatedAt: nowIso(),
     });
     this.pollers.delete(artifact.id);
-    this.updateWorkflow(artifact.caseId, "reconstruction", "failed", message);
+    const hasReadyLayer = this.store
+      .listArtifacts(artifact.caseId)
+      .some((candidate) => candidate.status === "ready");
+    this.updateWorkflow(
+      artifact.caseId,
+      "reconstruction",
+      hasReadyLayer ? "limited" : "failed",
+      hasReadyLayer
+        ? `One capture group was not reconstructed: ${message} Other verified plan or Gaussian layers remain available.`
+        : message,
+    );
+    if (failed.registration?.reportUrl) {
+      await this.queueRemainingCoverage(failed, true);
+    }
   }
 
   private localInputPath(evidence: EvidenceAsset): string | undefined {
@@ -674,6 +957,30 @@ function isReconstructionEligible(evidence: EvidenceAsset): boolean {
 
 type RegistrationReport = {
   disconnectedFrames?: unknown;
+  cameraPoses?: unknown;
+  poseOptimization?: {
+    beforeRmse?: unknown;
+    afterRmse?: unknown;
+  };
+  denseSurfaceRefinement?: {
+    denseBeforeRmseMeters?: unknown;
+    denseAfterRmseMeters?: unknown;
+  };
+  jointGeometry?: {
+    accepted?: unknown;
+    device?: unknown;
+    cuda?: unknown;
+    peakVramMb?: unknown;
+    rotationAgreementMedianDeg?: unknown;
+    cameraPoses?: unknown;
+  };
+  artifactCleanup?: {
+    removed?: unknown;
+    crossViewSupportedFraction?: unknown;
+  };
+  sourceCoverageRegularization?: {
+    affected?: unknown;
+  };
   preflight?: {
     acceptedPairs?: unknown;
   };
@@ -702,26 +1009,257 @@ function readRegistrationReport(
   }
 }
 
+function reconstructionGeometry(
+  artifact: ReconstructionArtifact,
+  job: WorkerJob,
+  report: RegistrationReport | undefined,
+  store: StructureStore,
+): ReconstructionGeometry | undefined {
+  const evidenceIds = artifact.evidenceIds ?? [artifact.evidenceId];
+  if (artifact.mode !== "multi_image") {
+    const evidence = store.getEvidence(artifact.evidenceId);
+    return {
+      backend: artifact.mode === "panorama" ? "sharp360" : "sharp_single_view",
+      coordinateFrame: "anchor_camera_metric_opencv",
+      jointCameraAccepted: false,
+      horizontalCoverageDegrees:
+        evidence?.capture?.horizontalCoverageDegrees ??
+        (artifact.mode === "panorama" ? 360 : 62),
+      cameraPoses: [
+        {
+          evidenceId: artifact.evidenceId,
+          sourceIndex: 0,
+          position: [0, 0, 0],
+          rotationWxyz: [1, 0, 0, 0],
+          scale: 1,
+          placement: "anchor",
+          confidenceScore: artifact.confidence.score,
+        },
+      ],
+    };
+  }
+
+  const rawPoses = Array.isArray(report?.cameraPoses) ? report.cameraPoses : [];
+  const jointPoses = Array.isArray(report?.jointGeometry?.cameraPoses)
+    ? report.jointGeometry.cameraPoses
+    : [];
+  const jointConfidence = new Map<number, number>();
+  for (const value of jointPoses) {
+    if (!value || typeof value !== "object") continue;
+    const item = value as Record<string, unknown>;
+    if (
+      Number.isInteger(item.frame) &&
+      typeof item.confidence === "number" &&
+      Number.isFinite(item.confidence)
+    ) {
+      jointConfidence.set(item.frame as number, item.confidence);
+    }
+  }
+  const cameraPoses: ReconstructionGeometry["cameraPoses"] = [];
+  for (const value of rawPoses) {
+    if (!value || typeof value !== "object") continue;
+    const item = value as Record<string, unknown>;
+    const sourceIndex = integerValue(item.frame);
+    const position = triple(item.position);
+    const rotationWxyz = quaternion(item.rotationWxyz);
+    const evidenceId =
+      sourceIndex === undefined ? undefined : evidenceIds[sourceIndex];
+    if (
+      sourceIndex === undefined ||
+      !evidenceId ||
+      !position ||
+      !rotationWxyz
+    ) {
+      continue;
+    }
+    const placement =
+      item.placement === "joint_camera_calibrated_by_metric_core"
+        ? "joint_camera_calibrated_by_metric_core"
+        : item.placement === "measured_feature_and_sharp_metric"
+          ? "measured_feature_and_sharp_metric"
+          : "anchor";
+    cameraPoses.push({
+      evidenceId,
+      sourceIndex,
+      position,
+      rotationWxyz,
+      scale: positiveNumber(item.scale) ?? 1,
+      placement,
+      confidenceScore:
+        placement === "measured_feature_and_sharp_metric"
+          ? Math.max(
+              job.registration_confidence ?? 0.5,
+              jointConfidence.get(sourceIndex) ?? 0,
+            )
+          : (jointConfidence.get(sourceIndex) ?? 0.55),
+    });
+  }
+  const peakVramMb = nonnegativeNumber(report?.jointGeometry?.peakVramMb);
+  return {
+    backend: "vggt_sharp_joint",
+    coordinateFrame: "anchor_camera_metric_opencv",
+    ...(typeof report?.jointGeometry?.device === "string"
+      ? { gpu: report.jointGeometry.device }
+      : {}),
+    ...(typeof report?.jointGeometry?.cuda === "string"
+      ? { cuda: report.jointGeometry.cuda }
+      : {}),
+    ...(peakVramMb !== undefined ? { peakVramMb } : {}),
+    jointCameraAccepted: report?.jointGeometry?.accepted === true,
+    cameraPoses,
+  };
+}
+
+function reconstructionQuality(
+  artifact: ReconstructionArtifact,
+  job: WorkerJob,
+  report: RegistrationReport | undefined,
+): ReconstructionQuality | undefined {
+  if (artifact.mode !== "multi_image") {
+    return {
+      registeredRatio: 1,
+      missingBridgeEvidenceIds: [],
+      cleanupRemovedGaussians: 0,
+    };
+  }
+  const evidenceIds = artifact.evidenceIds ?? [artifact.evidenceId];
+  const disconnected = Array.isArray(report?.disconnectedFrames)
+    ? report.disconnectedFrames
+        .map(integerValue)
+        .filter((value): value is number => value !== undefined)
+    : [];
+  const beforeRmse = nonnegativeNumber(report?.poseOptimization?.beforeRmse);
+  const afterRmse = nonnegativeNumber(report?.poseOptimization?.afterRmse);
+  const denseBeforeRmse = nonnegativeNumber(
+    report?.denseSurfaceRefinement?.denseBeforeRmseMeters,
+  );
+  const denseAfterRmse = nonnegativeNumber(
+    report?.denseSurfaceRefinement?.denseAfterRmseMeters,
+  );
+  const agreement = nonnegativeNumber(
+    report?.jointGeometry?.rotationAgreementMedianDeg,
+  );
+  const crossViewSupportedRatio = unitNumber(
+    report?.artifactCleanup?.crossViewSupportedFraction,
+  );
+  const sourceCoverageAdjusted = integerValue(
+    report?.sourceCoverageRegularization?.affected,
+  );
+  return {
+    registeredRatio:
+      (job.connected_frame_count ?? 1) /
+      Math.max(1, job.frame_count ?? evidenceIds.length),
+    missingBridgeEvidenceIds: disconnected.flatMap((index) =>
+      evidenceIds[index] ? [evidenceIds[index]!] : [],
+    ),
+    ...(beforeRmse !== undefined ? { poseGraphBeforeRmse: beforeRmse } : {}),
+    ...(afterRmse !== undefined ? { poseGraphAfterRmse: afterRmse } : {}),
+    ...(denseBeforeRmse !== undefined
+      ? { denseSurfaceBeforeRmseMeters: denseBeforeRmse }
+      : {}),
+    ...(denseAfterRmse !== undefined
+      ? { denseSurfaceAfterRmseMeters: denseAfterRmse }
+      : {}),
+    ...(agreement !== undefined
+      ? { rotationAgreementMedianDeg: agreement }
+      : {}),
+    cleanupRemovedGaussians:
+      integerValue(report?.artifactCleanup?.removed) ?? 0,
+    ...(crossViewSupportedRatio !== undefined
+      ? { crossViewSupportedRatio }
+      : {}),
+    ...(sourceCoverageAdjusted !== undefined
+      ? { sourceCoverageAdjustedGaussians: sourceCoverageAdjusted }
+      : {}),
+  };
+}
+
+function integerValue(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isInteger(value) && value >= 0
+    ? value
+    : undefined;
+}
+
+function nonnegativeNumber(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0
+    ? value
+    : undefined;
+}
+
+function unitNumber(value: unknown): number | undefined {
+  return typeof value === "number" &&
+    Number.isFinite(value) &&
+    value >= 0 &&
+    value <= 1
+    ? value
+    : undefined;
+}
+
+function positiveNumber(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) && value > 0
+    ? value
+    : undefined;
+}
+
+function triple(value: unknown): [number, number, number] | undefined {
+  return finiteTuple(value, 3) as [number, number, number] | undefined;
+}
+
+function quaternion(
+  value: unknown,
+): [number, number, number, number] | undefined {
+  return finiteTuple(value, 4) as [number, number, number, number] | undefined;
+}
+
+function finiteTuple(value: unknown, length: number): number[] | undefined {
+  if (
+    !Array.isArray(value) ||
+    value.length !== length ||
+    value.some((item) => typeof item !== "number" || !Number.isFinite(item))
+  ) {
+    return undefined;
+  }
+  return value as number[];
+}
+
 export function nextVerifiedFrameGroup(
   report: RegistrationReport | undefined,
 ): number[] | undefined {
-  if (!report || !Array.isArray(report.disconnectedFrames)) return undefined;
-  const disconnected = new Set(
-    report.disconnectedFrames.filter(
-      (value): value is number => Number.isInteger(value) && value >= 0,
-    ),
+  return verifiedFrameGroups(report)[0];
+}
+
+export function verifiedFrameGroups(
+  report: RegistrationReport | undefined,
+): number[][] {
+  return coverageFrameGroups(report, 0, false).filter(
+    (frames) => frames.length >= 2,
   );
-  if (disconnected.size < 2) return undefined;
+}
+
+export function coverageFrameGroups(
+  report: RegistrationReport | undefined,
+  frameCount: number,
+  includeEveryInput: boolean,
+): number[][] {
+  if (!report) return [];
+  const candidates = includeEveryInput
+    ? new Set(Array.from({ length: frameCount }, (_, index) => index))
+    : new Set(
+        Array.isArray(report.disconnectedFrames)
+          ? report.disconnectedFrames.filter(
+              (value): value is number => Number.isInteger(value) && value >= 0,
+            )
+          : [],
+      );
+  if (candidates.size === 0) return [];
   const pairs = Array.isArray(report.preflight?.acceptedPairs)
     ? report.preflight.acceptedPairs
         .map(parseFramePair)
         .filter((pair): pair is FramePair => Boolean(pair))
         .filter(
-          (pair) =>
-            disconnected.has(pair.frameA) && disconnected.has(pair.frameB),
+          (pair) => candidates.has(pair.frameA) && candidates.has(pair.frameB),
         )
     : [];
-  if (pairs.length === 0) return undefined;
 
   const adjacency = new Map<number, Set<number>>();
   for (const pair of pairs) {
@@ -734,7 +1272,7 @@ export function nextVerifiedFrameGroup(
   }
   const groups: Array<{ frames: number[]; confidence: number }> = [];
   const visited = new Set<number>();
-  for (const start of adjacency.keys()) {
+  for (const start of candidates) {
     if (visited.has(start)) continue;
     const stack = [start];
     const frames: number[] = [];
@@ -749,8 +1287,7 @@ export function nextVerifiedFrameGroup(
     const confidence = pairs
       .filter((pair) => groupSet.has(pair.frameA) && groupSet.has(pair.frameB))
       .reduce((sum, pair) => sum + pair.confidence, 0);
-    if (frames.length >= 2)
-      groups.push({ frames: frames.sort((a, b) => a - b), confidence });
+    groups.push({ frames: frames.sort((a, b) => a - b), confidence });
   }
   groups.sort(
     (left, right) =>
@@ -758,7 +1295,35 @@ export function nextVerifiedFrameGroup(
       right.confidence - left.confidence ||
       left.frames[0]! - right.frames[0]!,
   );
-  return groups[0]?.frames;
+  return groups.map((group) => group.frames);
+}
+
+function representedEvidenceIds(
+  artifacts: ReconstructionArtifact[],
+): Set<string> {
+  const represented = new Set<string>();
+  for (const artifact of artifacts) {
+    if (artifact.mode === "floorplan" || artifact.status === "failed") continue;
+    if (artifact.status === "queued" || artifact.status === "running") {
+      for (const id of artifact.evidenceIds ?? [artifact.evidenceId]) {
+        represented.add(id);
+      }
+      continue;
+    }
+    if (artifact.status !== "ready") continue;
+    if (artifact.mode === "multi_image") {
+      for (const pose of artifact.geometry?.cameraPoses ?? []) {
+        represented.add(pose.evidenceId);
+      }
+    } else {
+      represented.add(artifact.evidenceId);
+    }
+  }
+  return represented;
+}
+
+export function evidenceSignature(evidenceIds: string[]): string {
+  return [...new Set(evidenceIds)].sort().join("\u0000");
 }
 
 function parseFramePair(value: unknown): FramePair | undefined {
@@ -774,8 +1339,4 @@ function parseFramePair(value: unknown): FramePair | undefined {
         ? pair.confidence
         : 0,
   };
-}
-
-function evidenceSignature(evidenceIds: string[]): string {
-  return [...new Set(evidenceIds)].sort().join("\u0000");
 }

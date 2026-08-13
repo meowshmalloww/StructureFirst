@@ -12,12 +12,14 @@ import cookie from "@fastify/cookie";
 import multipart from "@fastify/multipart";
 import fastifyStatic from "@fastify/static";
 import Fastify, { type FastifyInstance, type FastifyRequest } from "fastify";
+import sharp from "sharp";
 import { z } from "zod";
 import {
   AddEvidenceLinkInputSchema,
   AiCaseAnalysisInputSchema,
   AiProviderIdSchema,
   CreateCaseInputSchema,
+  CaptureUploadModeSchema,
   DiscoveryRunInputSchema,
   LoadAiProviderModelsInputSchema,
   MultiReconstructionRequestSchema,
@@ -28,6 +30,8 @@ import {
   TestAiProviderInputSchema,
   UpdateIncidentInputSchema,
   type EvidenceAsset,
+  type CaptureInfo,
+  type CaptureUploadMode,
   type IncidentContext,
   type PhotoUploadResult,
   type Role,
@@ -63,6 +67,16 @@ const ProviderParamsSchema = z.object({
 const SESSION_COOKIE = "sf_session";
 const MAX_UPLOAD_BYTES = 1024 * 1024 * 1024;
 const MAX_UPLOAD_FILES = 50;
+const ClassifyImagesInputSchema = z.object({
+  evidenceIds: z
+    .array(z.string().min(8).max(128))
+    .max(MAX_UPLOAD_FILES)
+    .optional(),
+});
+const DetectionFrameInputSchema = z.object({
+  imageDataUrl: z.string().min(32).max(2_000_000),
+  scoreThreshold: z.number().min(0.1).max(0.9).optional(),
+});
 const MIME_EXTENSIONS: Record<string, string> = {
   "image/jpeg": ".jpg",
   "image/png": ".png",
@@ -116,6 +130,77 @@ export async function buildServer(
     bodyLimit: 2 * 1024 * 1024,
     requestTimeout: 30_000,
   });
+  const backgroundTasks = new Set<Promise<void>>();
+
+  const runBackground = (operation: () => Promise<void>): void => {
+    const task = operation()
+      .catch((error) => app.log.error(error))
+      .finally(() => backgroundTasks.delete(task));
+    backgroundTasks.add(task);
+  };
+
+  const organizeUploadedCapture = async (
+    caseId: string,
+    evidenceIds: string[],
+    resolvedMode: Exclude<CaptureUploadMode, "auto">,
+  ): Promise<void> => {
+    reconstruction.reportWorkflow(
+      caseId,
+      "running",
+      `Saved ${evidenceIds.length} files locally. Separating floorplans from photographic views.`,
+    );
+    // Classify the complete set before either reconstruction queue sees it.
+    // A page-statistics heuristic can suggest a plan, but it cannot reliably
+    // distinguish a plan, a bright room photo, or an unrelated image.
+    await sceneIntelligence.analyzeCase(caseId, evidenceIds);
+    const organized = evidenceIds
+      .map((evidenceId) => store.getEvidence(evidenceId))
+      .filter((item): item is EvidenceAsset => Boolean(item));
+    const plans = organized.filter(isFloorPlanEvidence);
+    if (plans.length) {
+      await reconstruction.queueFloorPlans(
+        caseId,
+        plans.map((item) => item.id),
+      );
+    }
+
+    const photoCandidates = organized.filter(
+      (item) =>
+        !isFloorPlanEvidence(item) &&
+        !item.tags.includes("reconstruction-excluded"),
+    );
+    if (photoCandidates.length) {
+      reconstruction.reportWorkflow(
+        caseId,
+        "running",
+        plans.length
+          ? `Building the plan reference while camera geometry checks ${photoCandidates.length} photographic views for a connected Gaussian scene.`
+          : `Checking ${photoCandidates.length} photographic views for one connected camera path. No floorplan is required.`,
+      );
+      if (resolvedMode !== "perspective" && photoCandidates.length === 1) {
+        await reconstruction.queue(caseId, {
+          evidenceId: photoCandidates[0]!.id,
+          mode: "panorama",
+        });
+      } else {
+        await reconstruction.queueCaptureSet(
+          caseId,
+          photoCandidates.map((item) => item.id),
+        );
+      }
+      return;
+    }
+    if (!photoCandidates.length) {
+      if (!plans.length) {
+        reconstruction.reportWorkflow(
+          caseId,
+          "limited",
+          "No uploaded file was eligible for structural or Gaussian reconstruction.",
+        );
+      }
+      return;
+    }
+  };
 
   await app.register(cookie, {
     secret: config.cookieSecret,
@@ -237,6 +322,11 @@ export async function buildServer(
 
   app.get("/api/settings", async () => settings.list());
 
+  app.post("/api/detection/frame", async (request) => {
+    const input = DetectionFrameInputSchema.parse(request.body);
+    return reconstruction.detectFrame(input);
+  });
+
   app.put("/api/settings/providers/:providerId", async (request) => {
     const { providerId } = ProviderParamsSchema.parse(request.params);
     const input = SaveAiProviderInputSchema.parse(request.body);
@@ -347,7 +437,12 @@ export async function buildServer(
     const { id } = IdParamsSchema.parse(request.params);
     if (!store.getCase(id))
       return reply.code(404).send({ error: "Case not found." });
-    const result = await sceneIntelligence.analyzeCase(id, undefined, true);
+    const input = ClassifyImagesInputSchema.parse(request.body ?? {});
+    const result = await sceneIntelligence.analyzeCase(
+      id,
+      input.evidenceIds,
+      true,
+    );
     sceneIntelligence.rebuildSpatialGraph(id);
     return result;
   });
@@ -512,20 +607,32 @@ export async function buildServer(
 
     const directory = resolve(config.casesRoot, id, "uploads");
     mkdirSync(directory, { recursive: true });
-    const pending: Array<{ asset: EvidenceAsset; outputPath: string }> = [];
+    const pending: Array<{
+      asset: EvidenceAsset;
+      outputPath: string;
+      width?: number;
+      height?: number;
+    }> = [];
     const writtenPaths: string[] = [];
     const overlapSetId = createId("capture_set");
     let totalBytes = 0;
+    let captureMode: CaptureUploadMode = "auto";
 
     try {
       const files = request.files({
         limits: {
           fileSize: MAX_UPLOAD_BYTES,
           files: MAX_UPLOAD_FILES,
-          parts: MAX_UPLOAD_FILES,
+          parts: MAX_UPLOAD_FILES + 2,
         },
       });
       for await (const part of files) {
+        if (pending.length === 0) {
+          const parsedMode = CaptureUploadModeSchema.safeParse(
+            multipartField(part.fields, "captureMode") ?? "auto",
+          );
+          if (parsedMode.success) captureMode = parsedMode.data;
+        }
         const extension = MIME_EXTENSIONS[part.mimetype];
         if (!extension || !part.mimetype.startsWith("image/")) {
           part.file.resume();
@@ -551,9 +658,18 @@ export async function buildServer(
           createWriteStream(outputPath, { flags: "wx" }),
         );
         if (part.file.truncated) throw new Error("PHOTO_BATCH_TOO_LARGE");
+        const metadata = await sharp(outputPath).metadata();
+        const swapsAxes =
+          metadata.orientation !== undefined &&
+          metadata.orientation >= 5 &&
+          metadata.orientation <= 8;
+        const width = swapsAxes ? metadata.height : metadata.width;
+        const height = swapsAxes ? metadata.width : metadata.height;
 
         pending.push({
           outputPath,
+          ...(width !== undefined ? { width } : {}),
+          ...(height !== undefined ? { height } : {}),
           asset: {
             id: createId("evidence"),
             caseId: id,
@@ -605,40 +721,77 @@ export async function buildServer(
     if (pending.length === 0)
       return reply.code(400).send({ error: "Select at least one photo." });
 
-    const assets = pending.map((item) => store.putEvidence(item.asset));
-    await sceneIntelligence.analyzeCase(
-      id,
-      assets.map((item) => item.id),
-    );
-    const analyzedAssets = assets.map(
-      (item) => store.getEvidence(item.id) ?? item,
-    );
-    const selected = analyzedAssets
-      .filter((item) => !item.tags.includes("reconstruction-excluded"))
-      .slice(0, 12);
-    if (selected.length === 0) {
-      const result: PhotoUploadResult = {
-        assets: analyzedAssets,
-        note: "The vision check excluded every upload as non-property or contradictory imagery; no reconstruction was started.",
-      };
-      return reply.code(201).send(result);
+    if (
+      captureMode !== "auto" &&
+      captureMode !== "perspective" &&
+      pending.length !== 1
+    ) {
+      for (const outputPath of writtenPaths)
+        rmSync(outputPath, { force: true });
+      return reply.code(400).send({
+        error: "Upload one stitched image for a 180° or 360° panorama.",
+      });
     }
-    const artifact =
-      selected.length === 1
-        ? await reconstruction.queue(id, {
-            evidenceId: selected[0]!.id,
-            mode: "single_image",
-          })
-        : await reconstruction.queueMulti(id, {
-            evidenceIds: selected.map((item) => item.id),
-          });
+    const resolvedMode = resolveCaptureMode(captureMode, pending);
+    const panoramaShapeError = validatePanoramaShape(resolvedMode, pending);
+    if (panoramaShapeError) {
+      for (const outputPath of writtenPaths)
+        rmSync(outputPath, { force: true });
+      return reply.code(400).send({ error: panoramaShapeError });
+    }
+    for (const [captureOrder, item] of pending.entries()) {
+      item.asset.capture = captureInfo(
+        resolvedMode,
+        captureOrder,
+        overlapSetId,
+        item.width,
+        item.height,
+        captureMode === "auto"
+          ? resolvedMode === "panorama_360"
+            ? "aspect_ratio"
+            : "default"
+          : "operator",
+      );
+      item.asset.tags.push(`projection:${item.asset.capture.projection}`);
+      item.asset.tags.push(`capture-order:${captureOrder}`);
+    }
+
+    await Promise.all(
+      pending.map(async (item) => {
+        if (
+          resolvedMode === "perspective" &&
+          (await isLikelyFloorPlan(item.outputPath))
+        ) {
+          item.asset.kind = "blueprint";
+          item.asset.tags = item.asset.tags.filter(
+            (tag) => tag !== "property-photo",
+          );
+          item.asset.tags.push("plan-candidate", "architectural-plan");
+          item.asset.notes =
+            "Locally stored operator upload. Image statistics indicate a likely floorplan; VLM classification and vector extraction run separately from photo splatting.";
+        }
+      }),
+    );
+
+    const assets = pending.map((item) => store.putEvidence(item.asset));
+    const planCandidates = assets.filter((item) =>
+      item.tags.includes("plan-candidate"),
+    ).length;
+    runBackground(() =>
+      organizeUploadedCapture(
+        id,
+        assets.map((item) => item.id),
+        resolvedMode,
+      ),
+    );
     const result: PhotoUploadResult = {
-      assets: analyzedAssets,
-      artifact,
-      note:
-        assets.length > selected.length
-          ? `Uploaded ${assets.length} photos. LucidFrame is connecting the first ${selected.length}; all photos remain saved.`
-          : `Uploaded ${assets.length} ${assets.length === 1 ? "photo" : "photos"} and started LucidFrame.`,
+      assets,
+      processing: {
+        status: "organizing",
+        totalFiles: assets.length,
+        planCandidates,
+      },
+      note: `Saved ${assets.length} original ${assets.length === 1 ? "file" : "files"}. ${planCandidates ? `${planCandidates} likely floorplans will build the structural floors; ` : ""}photographs are being checked for real overlap in the background.`,
     };
     return reply.code(201).send(result);
   });
@@ -798,6 +951,9 @@ export async function buildServer(
   }
 
   app.addHook("onClose", async () => store.close());
+  for (const item of store.listCases()) {
+    sceneIntelligence.rebuildSpatialGraph(item.id);
+  }
   reconstruction.resumePending();
 
   return {
@@ -832,6 +988,107 @@ function safeEqual(left: string, right: string): boolean {
   const leftHash = createHash("sha256").update(left).digest();
   const rightHash = createHash("sha256").update(right).digest();
   return timingSafeEqual(leftHash, rightHash);
+}
+
+function resolveCaptureMode(
+  requested: CaptureUploadMode,
+  photos: ReadonlyArray<{ width?: number; height?: number }>,
+): CaptureInfo["projection"] {
+  if (requested !== "auto") return requested;
+  if (photos.length !== 1) return "perspective";
+  const photo = photos[0];
+  if (
+    photo?.width !== undefined &&
+    photo.height !== undefined &&
+    photo.width / photo.height >= 1.85
+  ) {
+    return "panorama_360";
+  }
+  return "perspective";
+}
+
+function captureInfo(
+  projection: CaptureInfo["projection"],
+  captureOrder: number,
+  overlapSetId: string,
+  width: number | undefined,
+  height: number | undefined,
+  projectionSource: CaptureInfo["projectionSource"],
+): CaptureInfo {
+  return {
+    projection,
+    width: Math.max(1, width ?? 1),
+    height: Math.max(1, height ?? 1),
+    horizontalCoverageDegrees:
+      projection === "panorama_360"
+        ? 360
+        : projection === "panorama_180"
+          ? 180
+          : 62,
+    captureOrder,
+    overlapSetId,
+    projectionSource,
+  };
+}
+
+function validatePanoramaShape(
+  projection: CaptureInfo["projection"],
+  photos: ReadonlyArray<{ width?: number; height?: number }>,
+): string | undefined {
+  if (projection === "perspective") return undefined;
+  const photo = photos[0];
+  if (!photo?.width || !photo.height) {
+    return "The panorama dimensions could not be read.";
+  }
+  const ratio = photo.width / photo.height;
+  if (projection === "panorama_180" && (ratio < 0.9 || ratio > 1.1)) {
+    return "A 180° half-sphere panorama must use a 1:1 equirectangular layout.";
+  }
+  if (projection === "panorama_360" && (ratio < 1.9 || ratio > 2.1)) {
+    return "A full 360° panorama must use a 2:1 equirectangular layout.";
+  }
+  return undefined;
+}
+
+function isFloorPlanEvidence(evidence: EvidenceAsset): boolean {
+  if (evidence.tags.includes("reconstruction-excluded")) return false;
+  if (evidence.visualAnalysis) {
+    return (
+      evidence.visualAnalysis.sceneType === "floor_plan" ||
+      evidence.kind === "blueprint" ||
+      evidence.tags.includes("plan-candidate")
+    );
+  }
+  return (
+    evidence.kind === "blueprint" || evidence.tags.includes("plan-candidate")
+  );
+}
+
+async function isLikelyFloorPlan(path: string): Promise<boolean> {
+  try {
+    const stats = await sharp(path)
+      .rotate()
+      .resize({ width: 256, height: 256, fit: "inside" })
+      .removeAlpha()
+      .stats();
+    const means = stats.channels.slice(0, 3).map((channel) => channel.mean);
+    const mean = means.reduce((sum, value) => sum + value, 0) / means.length;
+    const colorSpread = Math.max(...means) - Math.min(...means);
+    const deviation =
+      stats.channels
+        .slice(0, 3)
+        .reduce((sum, channel) => sum + channel.stdev, 0) / 3;
+    return (
+      mean >= 215 &&
+      colorSpread <= 22 &&
+      deviation >= 8 &&
+      deviation <= 65 &&
+      stats.entropy >= 0.5 &&
+      stats.entropy <= 4.6
+    );
+  } catch {
+    return false;
+  }
 }
 
 function multipartField(

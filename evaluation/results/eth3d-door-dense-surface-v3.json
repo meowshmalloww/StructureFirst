@@ -1,0 +1,100 @@
+{
+  "schemaVersion": 1,
+  "datasetId": "eth3d-door-seven-view",
+  "passed": true,
+  "checks": {
+    "registrationRecall": true,
+    "registrationPrecision": true,
+    "rotationAgreement": true,
+    "gaussianCount": true,
+    "jointCameraAccepted": true,
+    "poseGraphImproved": true,
+    "pointOptimization": true,
+    "pointRmse": true,
+    "denseSurfaceImproved": true,
+    "overlapColorImproved": true,
+    "overlapColorSamples": true,
+    "scaleCountPreserved": true,
+    "sourceCoverageCountPreserved": true,
+    "crossViewSupport": true,
+    "inputHashes": true
+  },
+  "metrics": {
+    "expectedRegistered": [0, 1, 2, 3, 4, 5, 6],
+    "registered": [0, 1, 2, 3, 4, 5, 6],
+    "registrationRecall": 1.0,
+    "registrationPrecision": 1.0,
+    "roomCompleteness": {
+      "door-hall": 1.0
+    },
+    "jointCameraAccepted": true,
+    "rotationAgreementMedianDegrees": 1.835,
+    "poseGraphBeforeRmse": 0.1008696,
+    "poseGraphAfterRmse": 0.0783907,
+    "pointBeforeRmseMeters": 0.1198081,
+    "pointAfterRmseMeters": 0.1189119,
+    "pointConstraintCount": 4084,
+    "denseSurfaceOptimized": true,
+    "denseSurfaceBeforeRmseMeters": 0.0196839,
+    "denseSurfaceAfterRmseMeters": 0.0196301,
+    "denseSurfaceConstraintCount": 25200,
+    "overlapColorBeforeRmse": 0.0064901,
+    "overlapColorAfterRmse": 0.0052965,
+    "overlapColorSamples": 2730,
+    "scaleAdjustedGaussians": 0,
+    "scaleGaussianCountPreserved": true,
+    "sourceCoverageAdjustedGaussians": 5712671,
+    "sourceCoverageGaussianCountPreserved": true,
+    "crossViewSupportedRatio": 0.10208037,
+    "gaussianCount": 8222085,
+    "gpu": "NVIDIA GeForce RTX 4080 Laptop GPU",
+    "peakVramMb": 6654.8,
+    "legacyConnectedFrameGain": null
+  },
+  "inputVerification": {
+    "requested": true,
+    "passed": true,
+    "files": [
+      {
+        "index": 0,
+        "exists": true,
+        "sha256Matches": true
+      },
+      {
+        "index": 1,
+        "exists": true,
+        "sha256Matches": true
+      },
+      {
+        "index": 2,
+        "exists": true,
+        "sha256Matches": true
+      },
+      {
+        "index": 3,
+        "exists": true,
+        "sha256Matches": true
+      },
+      {
+        "index": 4,
+        "exists": true,
+        "sha256Matches": true
+      },
+      {
+        "index": 5,
+        "exists": true,
+        "sha256Matches": true
+      },
+      {
+        "index": 6,
+        "exists": true,
+        "sha256Matches": true
+      }
+    ]
+  },
+  "limitations": [
+    "This dataset validates one observed capture component.",
+    "Registration metrics do not validate unseen surfaces or safe routes.",
+    "Room/floor labels require separate ground-truth evaluation."
+  ]
+}

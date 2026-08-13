@@ -1,0 +1,44 @@
+{
+  "schemaVersion": 1,
+  "datasetId": "cerro-tololo-hotel-interior-360",
+  "passed": true,
+  "source": {
+    "url": "https://commons.wikimedia.org/wiki/File:Cerro_Tololo_Hotel_Interior_360_Panorama_(2022_04_08_Pano360_Tololo_Hotel_Room-CC).jpg",
+    "creator": "NOIRLab",
+    "license": "CC BY 4.0",
+    "width": 12892,
+    "height": 6446,
+    "byteSize": 13491081,
+    "sha256": "0e70e2c748a71983601890bcf622206706a23ab359e9563a8bc36d155ab8f96f"
+  },
+  "runtime": {
+    "mode": "panorama",
+    "projectionProfile": "full_equirectangular",
+    "qualityProfile": "detail",
+    "observedFraction": 1.0,
+    "lucidFrameRevision": "f48777638d6275b32bc01039168b5e4bd0f52d13",
+    "sharpCheckpointVerified": true
+  },
+  "metrics": {
+    "gaussianCount": 5801327,
+    "learnedGaussianCount": 5596527,
+    "coverageGuardCount": 204800,
+    "splatByteSize": 185642464,
+    "expectedSplatByteSize": 185642464,
+    "rangeRequestPassed": true,
+    "elapsedSeconds": 97.518
+  },
+  "checks": {
+    "sourceHash": true,
+    "fullResolutionSourceRetained": true,
+    "projectionRecognized": true,
+    "detailQualityUsed": true,
+    "splatRecordCount": true,
+    "byteRangeStreaming": true
+  },
+  "limitations": [
+    "A single full-sphere panorama measures only surfaces visible from one camera center.",
+    "Surfaces hidden behind furniture or other foreground objects remain unobserved.",
+    "The sample validates panorama reconstruction, not cross-room connectivity."
+  ]
+}

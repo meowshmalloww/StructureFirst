@@ -1,13 +1,14 @@
 import {
   Activity,
-  Bot,
   Check,
+  Cpu,
   ExternalLink,
+  Images,
   KeyRound,
   LoaderCircle,
   RefreshCw,
   Save,
-  Search,
+  ScanSearch,
   ShieldCheck,
   TriangleAlert,
 } from "lucide-react";
@@ -118,8 +119,8 @@ export function SettingsPage() {
           <h1>Settings</h1>
         </div>
         <p>
-          Configure one analysis connection and the automatic property-image
-          collector.
+          Configure the vision and language model used to classify manual
+          capture sets.
         </p>
       </header>
 
@@ -138,7 +139,7 @@ export function SettingsPage() {
           <section className="connection-card ai-connection-card">
             <header>
               <span className="settings-icon">
-                <Bot size={18} />
+                <ScanSearch size={18} />
               </span>
               <div>
                 <span className="card-kicker">Analysis</span>
@@ -166,26 +167,46 @@ export function SettingsPage() {
             </footer>
           </section>
 
-          <section className="connection-card source-connection-card">
+          <section className="connection-card analysis-readiness-card">
             <header>
-              <span className="settings-icon">
-                <Search size={18} />
-              </span>
+              <span className="settings-icon"><Activity size={18} /></span>
               <div>
-                <span className="card-kicker">Collection</span>
-                <h2>Online imagery</h2>
-                <p>Runs automatically when a new address is submitted.</p>
+                <span className="card-kicker">Capture pipeline</span>
+                <h2>What runs locally</h2>
+                <p>Only visual classification needs a provider key.</p>
               </div>
             </header>
-            <SearchSettings
-              settings={settings}
-              onSaved={(discovery) =>
-                setSettings((current) =>
-                  current ? { ...current, discovery } : current,
-                )
-              }
-            />
+            <div className="analysis-readiness-list">
+              <div>
+                <Images size={17} />
+                <span>
+                  <strong>Media triage</strong>
+                  <small>
+                    {settings.providers.some(
+                      (provider) => provider.enabled && provider.vision,
+                    )
+                      ? "Vision model active · room, plan, and unrelated-photo classification"
+                      : "Needs one verified vision-capable model"}
+                  </small>
+                </span>
+              </div>
+              <div>
+                <ScanSearch size={17} />
+                <span>
+                  <strong>Plan geometry</strong>
+                  <small>Local OCR and arbitrary-angle polygon extraction · no API key</small>
+                </span>
+              </div>
+              <div>
+                <Cpu size={17} />
+                <span>
+                  <strong>Gaussian reconstruction</strong>
+                  <small>Local reconstruction worker and GPU viewer · no AI API key</small>
+                </span>
+              </div>
+            </div>
           </section>
+
         </div>
       )}
     </div>
@@ -566,7 +587,7 @@ function ProviderForm({
   );
 }
 
-function SearchSettings({
+export function SearchSettings({
   settings,
   onSaved,
 }: {
@@ -640,17 +661,14 @@ function SearchSettings({
       </label>
 
       <details className="optional-search-key">
-        <summary>
-          Local browser agent (LLM-driven, restricted-local capture)
-        </summary>
+        <summary>Local browser agent</summary>
         <p>
-          Launches a visible Chrome or Edge and lets your configured AI
-          provider drive the mouse and keyboard to visit real-estate and
-          municipal pages, then downloads matching photos to this machine
-          only. Downloaded images are marked <strong>rights: restricted</strong>,
-          <strong> redistributable: false</strong>. They power local
-          reconstruction only and must not be shared. Requires a vision-capable
-          AI model in Settings above.
+          Launches a visible Chrome or Edge and lets your configured AI provider
+          drive the page. It verifies that the exact address and a full-size
+          image are visible on the same permitted source page. Image bytes are
+          downloaded only when an open or public-domain reuse policy is
+          established; unknown-rights results remain source links. Requires a
+          vision-capable AI model in Settings above.
         </p>
         <label className="search-toggle-row">
           <input
@@ -661,9 +679,10 @@ function SearchSettings({
           <span>
             <strong>Enable local browser agent</strong>
             <small>
-              Off by default. When on, the agent runs whenever you press
-              "Search". Watch the browser window; the agent stops on your
-              step budget below.
+              Runs during a new-address pipeline and whenever you press
+              "Search". Watch the browser window; the agent stops on your step
+              budget below and never bypasses a login, CAPTCHA, or blocked
+              source.
             </small>
           </span>
         </label>

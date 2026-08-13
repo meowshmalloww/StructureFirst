@@ -12,23 +12,20 @@ and confidence fields without exposing that implementation complexity in the UI.
    address.
 2. Overpass candidates are ranked by exact address tags, polygon containment,
    and distance to the footprint rather than the first geometry vertex.
-3. The discovery coordinator searches KartaView, Wikimedia Commons, Openverse,
-   Bing through a real Chrome/Edge session, and optional Brave Search.
-4. Browser results must contain the submitted street number and address terms.
-   Zillow and Redfin matches stay link-only and are never crawled for media.
-5. Modification-safe public-domain and Creative Commons images are imported
-   automatically. Only exact address-text matches or operator uploads are
-   eligible for automatic reconstruction.
-6. A configured vision model classifies permitted local images. The server,
+3. Online discovery is skipped by the normal pipeline. Its source-policy and
+   browser-agent implementation remains available for later work.
+4. A configured vision model classifies permitted local images. The server,
    not the model, determines address match and rejects unsupported floor claims.
-7. Responder images are stored inside the property directory with a
+5. Responder images are stored inside the property directory with a
    generated filename, byte count, MIME type, and SHA-256 digest.
-8. The local Python worker automatically reconstructs eligible local images
-   with LucidFrame.
-9. AI providers may create source-linked hazard candidates. They cannot create
+6. The server naturally orders the capture filenames, divides large sets into
+   overlapping jobs, and shares exact bridge frames between adjacent jobs.
+7. The local Python worker reconstructs eligible local images with LucidFrame.
+8. AI providers may create source-linked hazard candidates. They cannot create
    verified geometry, a confirmed hazard, or a route by themselves.
-10. The browser shows one map/3D canvas, real preparation progress, and the photo
-    sources. Operational review data remains an internal safety boundary.
+9. A locked-down Electron/TypeScript shell shows one map/3D canvas, real
+   preparation progress, and the manual capture set. Operational review data
+   remains an internal safety boundary.
 
 Pipeline stages are persisted and streamed to the browser. A provider outage is
 reported as limited or failed; it is never rewritten as success.
@@ -62,6 +59,10 @@ An intelligence gap can be verified while the building geometry remains unknown.
 The importer blocks private-network targets, checks redirects and DNS results,
 limits downloads to 20 MB, verifies image signatures, and retains attribution.
 Indexed license metadata and address relevance still require item-level review.
+The browser agent additionally checks click targets and intercepts prohibited
+navigation requests before the destination loads. Webpage instructions are
+treated as untrusted content and cannot change the agent's task or source
+policy.
 
 ## AI providers
 
@@ -96,36 +97,74 @@ only after confirming:
 file size = Gaussian count x 32 bytes
 ```
 
-For 2 to 12 unordered photos, smart connect:
+Panorama uploads use explicit projection contracts: a 180° half-sphere
+equirectangular image is approximately 1:1 and a full-sphere 360° image is
+approximately 2:1. StructureFirst adapts LucidFrame's in-process panorama input
+guard so its existing partial-panorama normalizer can receive canonical 1:1
+input. The exact LucidFrame `reconstruct_sharp360` function, source files, and
+official SHARP checkpoint remain unchanged. The partial layout marks only about
+half of the spherical canvas as observed and does not add pole caps.
+
+Each smart-connect job accepts 2 to 12 unordered photos. A larger capture walk
+is planned as 12-frame windows with three exact frames shared between adjacent
+windows. Smart connect then:
 
 1. tests every pair with SIFT and an indoor LoFTR matcher plus robust geometry;
-2. forms the strongest verified overlap core before spending GPU time;
+2. forms the strongest verified overlap core before spending GPU time and
+   requires it to cover at least half of that capture-set window;
 3. lets DINOv2 place affinity and EXIF capture continuity nominate likely
    same-room angles, without assigning them a position;
-4. excludes unrelated outliers and reconstructs only selected frames with SHARP;
-5. lifts verified image matches into SHARP's metric 3D points and estimates a
+4. EXIF-normalizes nominated source views and asks VGGT for one shared camera
+   and depth solution on CUDA;
+5. excludes unrelated outliers and reconstructs selected frames with SHARP;
+6. lifts verified image matches into SHARP's metric 3D points and estimates a
    RANSAC similarity transform;
-6. leaves recognized views without cross-image geometry unregistered instead
-   of placing them from similar point-cloud shape;
-7. builds a maximum-confidence graph from transforms that pass metric gates;
-8. jointly refines camera similarities against every verified edge when a loop
-   closure exists;
-9. transforms Gaussian positions, scales, and covariance rotations before merge;
+7. calibrates VGGT's arbitrary translation scale from the measured metric core
+   and rejects the joint solution when its rotations disagree with that core;
+8. builds a maximum-confidence graph from measured transforms and accepted
+   joint-camera edges;
+9. jointly refines camera similarities against every accepted edge and up to
+   512 retained SHARP metric inlier points per pair, including loop closure;
 10. removes only Gaussians that contradict measured front surfaces in other
     registered views;
-11. queues a disconnected group as another room only when that group has its
-    own verified overlap edge.
+11. shrinks only rare single-axis needle supports above the per-view scale
+    tail; no Gaussian is deleted and ordinary two-axis surface splats remain;
+12. solves bounded RGB gains from geometrically verified overlap pixels rather
+    than unrelated whole-image medians;
+13. transforms Gaussian positions, scales, and covariance rotations before
+    merge;
+14. queues every disconnected group as another room only when that group has
+    its own verified overlap graph.
 
 The registration report records match counts, inliers, scale, error, confidence,
 and excluded frames. The system does not concatenate unrelated splats and call
-them one room. When an explicitly grouped photo set fails registration, the
-worker publishes an exact single-photo LucidFrame reconstruction and records the
-fallback and reason in the manifest.
+them one room. When a multi-photo set fails registration or only a minority
+cluster connects, the job fails explicitly and does not publish one source photo
+as a Gaussian room or building.
 
 Rescue View keeps and renders the complete compiled splat by default. Spark's
 LoD hierarchy is disabled for evidence inspection, pre-blur is disabled, and
-the normal full Gaussian footprint is retained. The viewer reports the actual
-WebGL adapter so an integrated-GPU browser is not mistaken for RTX rendering.
+the browser uses its native device pixel ratio. The viewer reports the actual
+WebGL adapter, live FPS, calibrated source-camera bookmarks, and a top-down
+camera map so an integrated-GPU browser is not mistaken for RTX rendering.
+A 90-degree camera-roll control corrects presentation when source orientation
+metadata is missing without rewriting evidence bytes or reconstruction
+geometry.
+
+Each room/floor node belongs to one reconstruction-local metric coordinate
+frame and stores the centroid of its calibrated source cameras. Same-type rooms
+remain distinct unless verified overlap joins their frames. A graph edge is
+created inside one frame only when camera proximity is paired with a VLM door,
+corridor, or stair observation. Two reconstruction windows may also have an
+explicit bridge edge when they share exact source frames. Their splats remain in
+separate local coordinate frames until a house-level similarity merge is
+accepted.
+
+When there is no floorplan, the calibrated camera rotations establish a shared
+up direction and metric camera elevation produces conservative observed-level
+indices. These indices can separate same-type rooms across storeys, but remain
+`Observed level N`; only visible labels, stairs, exterior grade evidence, or a
+supplied plan may name a level as ground, basement, upper, or attic.
 
 ## Visual evidence is not navigation truth
 
@@ -133,7 +172,8 @@ A photorealistic splat does not prove hidden rooms, floor connections,
 load-bearing systems, current smoke conditions, or safe passage. Therefore:
 
 - unknown space stays unknown;
-- no structure edge is derived from appearance alone;
+- no structure edge is created across reconstruction frames without shared,
+  exact bridge evidence;
 - route generation requires a connected evidence-backed graph;
 - every AI hazard and route remains pending until reviewed.
 

@@ -1,0 +1,41 @@
+{
+  "schemaVersion": 1,
+  "datasetId": "eth3d-door-seven-view",
+  "passed": true,
+  "checks": {
+    "inputHashes": true,
+    "registrationRecall": true,
+    "registrationPrecision": true,
+    "jointCameraAccepted": true,
+    "poseGraphImproved": true,
+    "pointOptimization": true,
+    "pointRmse": true,
+    "overlapColorImproved": true,
+    "overlapColorSamples": true,
+    "scaleCountPreserved": true,
+    "splatSize": true
+  },
+  "metrics": {
+    "registeredFrames": 7,
+    "frameCount": 7,
+    "gaussianCount": 8222369,
+    "splatBytes": 263115808,
+    "rotationAgreementMedianDegrees": 1.839,
+    "poseGraphBeforeRmse": 0.1114377,
+    "poseGraphAfterRmse": 0.0812658,
+    "pointConstraintCount": 4088,
+    "pointBeforeRmseMeters": 0.1196805,
+    "pointAfterRmseMeters": 0.1187309,
+    "overlapColorSamples": 2731,
+    "overlapColorBeforeRmse": 0.0065168,
+    "overlapColorAfterRmse": 0.0053217,
+    "scaleAdjustedGaussians": 2,
+    "scaleDeletedGaussians": 0,
+    "gpu": "NVIDIA GeForce RTX 4080 Laptop GPU",
+    "peakVramMb": 6654.8
+  },
+  "limitations": [
+    "The source files omit EXIF orientation and are stored sideways; Rescue View preserves evidence orientation and provides a non-destructive Roll 90 degree control.",
+    "Observed visual geometry does not establish unseen surfaces or a safe route."
+  ]
+}

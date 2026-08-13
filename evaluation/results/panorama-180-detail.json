@@ -1,0 +1,48 @@
+{
+  "schemaVersion": 1,
+  "datasetId": "cerro-tololo-hotel-interior-180-half-sphere",
+  "passed": true,
+  "source": {
+    "derivedFrom": "https://commons.wikimedia.org/wiki/File:Cerro_Tololo_Hotel_Interior_360_Panorama_(2022_04_08_Pano360_Tololo_Hotel_Room-CC).jpg",
+    "derivation": "Lossless PNG encoding of the left 6446-pixel hemisphere from the original 12892x6446 equirectangular panorama; no resize or quality reduction.",
+    "creator": "NOIRLab",
+    "license": "CC BY 4.0",
+    "width": 6446,
+    "height": 6446,
+    "byteSize": 26254010,
+    "sha256": "d9e412d4bbb7915822b6f9ed2eef3732cc27fd2f5c257fa647454073acb4386d"
+  },
+  "runtime": {
+    "mode": "panorama",
+    "projectionProfile": "partial_panorama",
+    "qualityProfile": "detail",
+    "observedFraction": 0.49844,
+    "poleCaps": false,
+    "lucidFrameRevision": "f48777638d6275b32bc01039168b5e4bd0f52d13",
+    "sharpCheckpointVerified": true,
+    "structureFirstInputAdapter": "Canonical 1:1 half-sphere ERP accepted; LucidFrame partial-panorama normalization retained."
+  },
+  "metrics": {
+    "gaussianCount": 5767405,
+    "learnedGaussianCount": 5562605,
+    "coverageGuardCount": 204800,
+    "splatByteSize": 184556960,
+    "expectedSplatByteSize": 184556960,
+    "rangeRequestPassed": true,
+    "elapsedSeconds": 63.877
+  },
+  "checks": {
+    "sourceHash": true,
+    "fullResolutionSourceRetained": true,
+    "projectionRecognized": true,
+    "unseenHalfNotMarkedObserved": true,
+    "detailQualityUsed": true,
+    "splatRecordCount": true,
+    "byteRangeStreaming": true
+  },
+  "limitations": [
+    "The unobserved hemisphere is not measured and must not be used as verified tactical geometry.",
+    "A single camera center cannot reveal surfaces hidden behind foreground objects.",
+    "The sample validates half-sphere panorama reconstruction, not cross-room connectivity."
+  ]
+}

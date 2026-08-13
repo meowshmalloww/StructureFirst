@@ -206,7 +206,14 @@ def recognize_scene_frames(
     embeddings: np.ndarray | None,
     captures: list[CaptureMetadata],
 ) -> tuple[list[int], list[dict[str, Any]], float | None]:
-    """Nominate same-scene frames; geometry must still register each nominee."""
+    """Nominate same-scene frames; joint geometry must still register them.
+
+    A continuous phone capture can turn across a blank wall and have almost no
+    pairwise feature overlap. Exact device/time continuity is therefore enough
+    to nominate a frame from the same responder burst. Downloaded distractors
+    normally lack that EXIF continuity, and nomination still does not place a
+    frame: shared-camera geometry plus measured SHARP constraints decide that.
+    """
     recognized = set(core_indices)
     reports: list[dict[str, Any]] = []
     if not core_indices:
@@ -252,14 +259,7 @@ def recognize_scene_frames(
         session_match = (
             nearest_capture_seconds is not None and nearest_capture_seconds <= 120.0
         )
-        accepted_by_session = bool(
-            session_match
-            and (
-                affinity is None
-                or session_threshold is None
-                or affinity >= session_threshold
-            )
-        )
+        accepted_by_session = bool(session_match)
         accepted_by_visual = bool(
             affinity is not None
             and visual_threshold is not None
@@ -276,9 +276,7 @@ def recognize_scene_frames(
                 "nearestCaptureSeconds": nearest_capture_seconds,
                 "coreAffinity": round(affinity, 4) if affinity is not None else None,
                 "reason": (
-                    "capture continuity and visual-place affinity"
-                    if accepted_by_session and affinity is not None
-                    else "capture continuity"
+                    "exact device/time capture continuity; joint geometry still required"
                     if accepted_by_session
                     else "strong visual-place affinity; geometry still required"
                     if accepted_by_visual

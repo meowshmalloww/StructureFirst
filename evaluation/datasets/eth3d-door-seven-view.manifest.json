@@ -1,0 +1,80 @@
+{
+  "schemaVersion": 1,
+  "id": "eth3d-door-seven-view",
+  "description": "Seven full-resolution, calibrated DSLR views of the ETH3D door scene. The stored portrait scene is a deliberate orientation and fine-detail robustness test.",
+  "rights": "ETH3D academic benchmark; source pixels are downloaded locally and are not redistributed by StructureFirst.",
+  "source": {
+    "dataset": "ETH3D high-resolution multi-view training data",
+    "scene": "door",
+    "url": "https://www.eth3d.net/data/door_dslr_undistorted.7z",
+    "archiveSha256": "f99ed28150d73dfa22a84b01211966b292f70ca959883da2f703ee1ca4f54506"
+  },
+  "inputRoot": "../../data/evaluation/eth3d-door/door/images/dslr_images_undistorted",
+  "frames": [
+    {
+      "index": 0,
+      "file": "DSC_0501.JPG",
+      "sha256": "4e655b84802c33529f5e899eb420c4e5d4ef50898fed1fb340d023d435091656",
+      "roomId": "door-hall",
+      "expectedRegistered": true
+    },
+    {
+      "index": 1,
+      "file": "DSC_0502.JPG",
+      "sha256": "c73c96917148c57b62f8f65db93bb37e9eaaa4094e7d2900456df77df4af8128",
+      "roomId": "door-hall",
+      "expectedRegistered": true
+    },
+    {
+      "index": 2,
+      "file": "DSC_0503.JPG",
+      "sha256": "96a1520e0bfa5c84411ef26e26763a35d4a1e67ec5d794dd5fc1d593ed56161f",
+      "roomId": "door-hall",
+      "expectedRegistered": true
+    },
+    {
+      "index": 3,
+      "file": "DSC_0504.JPG",
+      "sha256": "04df93d9055a62e415a11cd63b9acc5d75603adadf04c0995dc2bfefa3356185",
+      "roomId": "door-hall",
+      "expectedRegistered": true
+    },
+    {
+      "index": 4,
+      "file": "DSC_0505.JPG",
+      "sha256": "70e7bd734aa8d687b7e7d3131f00117c35a8fab4ca5d740cd720b8a1eb42caa8",
+      "roomId": "door-hall",
+      "expectedRegistered": true
+    },
+    {
+      "index": 5,
+      "file": "DSC_0506.JPG",
+      "sha256": "fb2b006a5a68ef305a9aa2da57c2efa1cb6f69a0bdbbbdd971e0fe8a2189a7db",
+      "roomId": "door-hall",
+      "expectedRegistered": true
+    },
+    {
+      "index": 6,
+      "file": "DSC_0507.JPG",
+      "sha256": "2eeae8eccb5b07ba98c0c721d5020ed2230a9cfc6ee736ba59d46b53b61058b0",
+      "roomId": "door-hall",
+      "expectedRegistered": true
+    }
+  ],
+  "thresholds": {
+    "minimumRegistrationRecall": 0.85,
+    "minimumRegistrationPrecision": 1.0,
+    "maximumRotationAgreementMedianDegrees": 15.0,
+    "minimumGaussianCount": 6000000,
+    "requireJointCameraAcceptance": true,
+    "requirePoseGraphImprovement": true,
+    "requirePointOptimization": true,
+    "maximumPointRmseMeters": 0.2,
+    "requireDenseSurfaceImprovement": true,
+    "requireOverlapColorImprovement": true,
+    "minimumOverlapColorSamples": 1000,
+    "requireScaleCountPreserved": true,
+    "requireSourceCoverageCountPreserved": true,
+    "minimumCrossViewSupportedRatio": 0.08
+  }
+}

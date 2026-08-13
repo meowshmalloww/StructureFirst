@@ -3,6 +3,8 @@ import {
   ArrowLeft,
   ArrowRight,
   ArrowUp,
+  Camera,
+  Crosshair,
   ChevronsDown,
   ChevronsUp,
   Expand,
@@ -13,7 +15,12 @@ import {
 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import type { PointerEvent as ReactPointerEvent } from "react";
-import type { ReconstructionArtifact } from "@structurefirst/contracts";
+import type {
+  ReconstructionArtifact,
+  ReconstructionCameraPose,
+} from "@structurefirst/contracts";
+import { nextRenderScale } from "../lib/render-performance";
+import { api, type LiveDetection } from "../lib/api";
 
 type ThreeModule = typeof import("three");
 
@@ -41,27 +48,58 @@ type Engine = {
 
 export function SplatViewer({
   artifact,
+  focusEvidenceId,
 }: {
   artifact: ReconstructionArtifact;
+  focusEvidenceId?: string;
 }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const frameRef = useRef<HTMLDivElement>(null);
   const engineRef = useRef<Engine | null>(null);
+  const detectorEnabledRef = useRef(true);
+  const detectionBusyRef = useRef(false);
   const [progress, setProgress] = useState(0);
   const [error, setError] = useState<string>();
   const [attempt, setAttempt] = useState(0);
   const [gpuRenderer, setGpuRenderer] = useState("");
+  const [framesPerSecond, setFramesPerSecond] = useState(0);
+  const [renderScale, setRenderScale] = useState(1);
+  const [cameraPosition, setCameraPosition] = useState<
+    [number, number, number]
+  >([0, 0, 0]);
+  const [selectedSourceIndex, setSelectedSourceIndex] = useState(0);
+  const [showSourceViews, setShowSourceViews] = useState(false);
+  const [detectorEnabled, setDetectorEnabled] = useState(true);
+  const [detections, setDetections] = useState<LiveDetection[]>([]);
+  const [detectorStatus, setDetectorStatus] = useState<{
+    model: string;
+    provider: string;
+    inferenceMs: number;
+  }>();
+  const [detectorError, setDetectorError] = useState<string>();
   const sceneMode = artifact.mode === "panorama" ? "panorama" : "image";
+  const sourceCameras = artifact.geometry?.cameraPoses ?? [];
+
+  useEffect(() => {
+    detectorEnabledRef.current = detectorEnabled;
+    if (!detectorEnabled) {
+      setDetections([]);
+      setDetectorError(undefined);
+    }
+  }, [detectorEnabled]);
 
   useEffect(() => {
     const splatUrl = artifact.splatUrl;
     if (!splatUrl || !canvasRef.current) return;
     let cancelled = false;
-    let animationFrame = 0;
     let pending: Partial<Engine> = {};
     setProgress(0);
     setError(undefined);
     setGpuRenderer("");
+    setFramesPerSecond(0);
+    setRenderScale(1);
+    setCameraPosition([0, 0, 0]);
+    setSelectedSourceIndex(0);
 
     void (async () => {
       try {
@@ -86,6 +124,8 @@ export function SplatViewer({
 
         const renderer = new THREE.WebGLRenderer({
           canvas: canvasRef.current,
+          // Spark renders analytic Gaussian footprints; WebGL MSAA does not
+          // improve them and costs substantial fill-rate at native DPR.
           antialias: false,
           alpha: false,
           premultipliedAlpha: true,
@@ -112,14 +152,25 @@ export function SplatViewer({
 
         const spark = new sparkModule.SparkRenderer({
           renderer,
-          // Rescue View favors source fidelity. Z-depth sorting matches the
-          // training convention, no pre-blur is added, and the full Gaussian
-          // footprint is retained.
-          sortRadial: false,
+          // SHARP exports are trained and previewed with depth-ordered alpha
+          // compositing. Keep their native footprint: pre-blur enlarges every
+          // Gaussian and makes independently reconstructed views bleed together.
+          // Multi-view scenes are meant to be rotated and traversed. Spark's
+          // radial metric is more stable under viewpoint rotation; a single
+          // SHARP source retains its source-trained Z-depth sorting.
+          sortRadial: artifact.mode === "multi_image",
           preBlurAmount: 0,
-          maxStdDev: Math.sqrt(8),
-          minAlpha: 0.5 / 255,
-          minSortIntervalMs: sceneMode === "panorama" ? 80 : 20,
+          blurAmount: artifact.mode === "multi_image" ? 0.12 : 0,
+          maxStdDev:
+            artifact.mode === "multi_image" ? Math.sqrt(9) : Math.sqrt(8),
+          minAlpha:
+            artifact.mode === "multi_image" ? 0.25 / 255 : 0.5 / 255,
+          minSortIntervalMs:
+            sceneMode === "panorama"
+              ? 50
+              : isIntegratedRenderer(rendererName)
+                ? 33
+                : 16,
           enableLod: false,
         });
         scene.add(spark);
@@ -157,6 +208,14 @@ export function SplatViewer({
           THREE,
         };
         engineRef.current = engine;
+        const initialPose = sourceCameras.find(
+          (pose) => pose.evidenceId === focusEvidenceId,
+        );
+        if (initialPose) {
+          placeAtSourceCamera(engine, initialPose);
+          setSelectedSourceIndex(initialPose.sourceIndex);
+          setCameraPosition([...initialPose.position]);
+        }
         pending = {};
         setProgress(1);
         canvasRef.current.dataset.splatReady = "true";
@@ -166,22 +225,94 @@ export function SplatViewer({
 
         let renderedFrames = 0;
         let frameWindowStarted = performance.now();
+        let activeRenderScale = 1;
+        let lastMotionAt = frameWindowStarted;
+        let lastDetectionAt = 0;
+        const detectionCanvas = document.createElement("canvas");
         const render = () => {
           if (cancelled) return;
-          resizeRenderer(renderer, camera, sceneMode);
-          engine.controls.update();
+          resizeRenderer(renderer, camera, sceneMode, activeRenderScale);
+          if (engine.controls.update()) lastMotionAt = performance.now();
           renderer.render(scene, camera);
           renderedFrames += 1;
           const now = performance.now();
+          if (
+            detectorEnabledRef.current &&
+            now - lastDetectionAt >= 650 &&
+            !detectionBusyRef.current
+          ) {
+            lastDetectionAt = now;
+            detectionBusyRef.current = true;
+            const sourceWidth = Math.max(1, renderer.domElement.width);
+            const sourceHeight = Math.max(1, renderer.domElement.height);
+            detectionCanvas.width = Math.min(640, sourceWidth);
+            detectionCanvas.height = Math.max(
+              1,
+              Math.round(
+                detectionCanvas.width * (sourceHeight / sourceWidth),
+              ),
+            );
+            const context = detectionCanvas.getContext("2d", {
+              alpha: false,
+            });
+            if (context) {
+              context.drawImage(
+                renderer.domElement,
+                0,
+                0,
+                detectionCanvas.width,
+                detectionCanvas.height,
+              );
+              const imageDataUrl = detectionCanvas.toDataURL("image/jpeg", 0.78);
+              void api
+                .detectFrame(imageDataUrl)
+                .then((result) => {
+                  if (cancelled || !detectorEnabledRef.current) return;
+                  setDetections(result.detections);
+                  setDetectorStatus({
+                    model: result.model,
+                    provider: result.provider,
+                    inferenceMs: result.inferenceMs,
+                  });
+                  setDetectorError(undefined);
+                })
+                .catch((caught) => {
+                  if (cancelled || !detectorEnabledRef.current) return;
+                  setDetectorError(
+                    caught instanceof Error
+                      ? caught.message
+                      : "Local detector unavailable.",
+                  );
+                })
+                .finally(() => {
+                  detectionBusyRef.current = false;
+                });
+            } else {
+              detectionBusyRef.current = false;
+            }
+          }
           const frameWindowMs = now - frameWindowStarted;
           if (frameWindowMs >= 750) {
             const fps = (renderedFrames * 1_000) / frameWindowMs;
+            const nextScale = nextRenderScale({
+              currentScale: activeRenderScale,
+              framesPerSecond: fps,
+              moving: now - lastMotionAt < 260,
+              integratedGpu: isIntegratedRenderer(rendererName),
+            });
+            if (nextScale !== activeRenderScale) {
+              activeRenderScale = nextScale;
+              setRenderScale(nextScale);
+            }
             renderer.domElement.dataset.renderFps = fps.toFixed(1);
+            setFramesPerSecond(fps);
             renderer.domElement.dataset.activeSplats = String(
               spark.activeSplats,
             );
-            renderer.domElement.dataset.detailScale = "1.000";
-            renderer.domElement.dataset.detailMode = "full";
+            renderer.domElement.dataset.detailScale =
+              activeRenderScale.toFixed(3);
+            renderer.domElement.dataset.detailMode =
+              activeRenderScale === 1 ? "native" : "motion-buffer";
             renderer.domElement.dataset.cameraPosition = [
               camera.position.x,
               camera.position.y,
@@ -189,12 +320,16 @@ export function SplatViewer({
             ]
               .map((value) => value.toFixed(4))
               .join(",");
+            setCameraPosition([
+              camera.position.x,
+              camera.position.y,
+              camera.position.z,
+            ]);
             renderedFrames = 0;
             frameWindowStarted = now;
           }
-          animationFrame = requestAnimationFrame(render);
         };
-        render();
+        renderer.setAnimationLoop(render);
       } catch (caught) {
         if (!cancelled)
           setError(
@@ -207,7 +342,11 @@ export function SplatViewer({
 
     return () => {
       cancelled = true;
-      cancelAnimationFrame(animationFrame);
+      // Stop rendering synchronously before any Spark or Three resources are
+      // disposed. This prevents a stale frame from using a torn-down renderer
+      // while React mounts the next Gaussian artifact.
+      engineRef.current?.renderer.setAnimationLoop(null);
+      pending.renderer?.setAnimationLoop(null);
       if (canvasRef.current) {
         delete canvasRef.current.dataset.splatReady;
         delete canvasRef.current.dataset.gaussianCount;
@@ -221,6 +360,7 @@ export function SplatViewer({
       }
       const engine = engineRef.current;
       engineRef.current = null;
+      detectionBusyRef.current = false;
       if (engine) {
         void disposeEngine(engine);
       } else {
@@ -234,6 +374,18 @@ export function SplatViewer({
       }
     };
   }, [artifact.id, artifact.splatUrl, attempt, sceneMode]);
+
+  useEffect(() => {
+    if (!focusEvidenceId) return;
+    const engine = engineRef.current;
+    const pose = sourceCameras.find(
+      (candidate) => candidate.evidenceId === focusEvidenceId,
+    );
+    if (!engine || !pose) return;
+    placeAtSourceCamera(engine, pose);
+    setCameraPosition([...pose.position]);
+    setSelectedSourceIndex(pose.sourceIndex);
+  }, [artifact.id, focusEvidenceId]);
 
   function resetCamera() {
     const engine = engineRef.current;
@@ -257,6 +409,17 @@ export function SplatViewer({
     engineRef.current?.controls.nudge(action);
   }
 
+  function focusSourceCamera(pose: ReconstructionCameraPose) {
+    const engine = engineRef.current;
+    if (!engine) return;
+    placeAtSourceCamera(engine, pose);
+    setCameraPosition([...pose.position]);
+    setSelectedSourceIndex(pose.sourceIndex);
+  }
+
+  const captureCoverage = captureCoverageStatus(sourceCameras, cameraPosition);
+  const crossViewSupportedRatio = artifact.quality?.crossViewSupportedRatio;
+
   return (
     <div className="splat-frame" ref={frameRef}>
       <canvas
@@ -264,6 +427,29 @@ export function SplatViewer({
         tabIndex={0}
         aria-label="Interactive LucidFrame Gaussian reconstruction. Drag to look and use WASD to move."
       />
+      {detectorEnabled ? (
+        <div className="viewer-detection-layer" aria-live="polite">
+          {detections.map((detection, index) => (
+            <div
+              className={`viewer-detection-box detection-${detection.priority}`}
+              key={`${detection.label}-${index}`}
+              style={{
+                left: `${detection.x * 100}%`,
+                top: `${detection.y * 100}%`,
+                width: `${detection.width * 100}%`,
+                height: `${detection.height * 100}%`,
+              }}
+            >
+              <span>
+                {detection.label} {Math.round(detection.score * 100)}%
+              </span>
+              {detection.priority !== "standard" ? (
+                <strong>{detection.tacticalLabel}</strong>
+              ) : null}
+            </div>
+          ))}
+        </div>
+      ) : null}
       {progress < 1 && !error ? (
         <div className="viewer-loading" role="status">
           <span>Loading Gaussian scene</span>
@@ -285,6 +471,24 @@ export function SplatViewer({
         </div>
       ) : null}
       <div className="viewer-tools">
+        <button
+          type="button"
+          aria-pressed={detectorEnabled}
+          onClick={() => setDetectorEnabled((enabled) => !enabled)}
+          title="Toggle local YOLO26 view-space boxes"
+        >
+          <Crosshair size={16} /> {detectorEnabled ? "Boxes on" : "Boxes off"}
+        </button>
+        {sourceCameras.length > 1 ? (
+          <button
+            type="button"
+            aria-pressed={showSourceViews}
+            onClick={() => setShowSourceViews((visible) => !visible)}
+            title="Show calibrated source-camera jump controls"
+          >
+            <Camera size={16} /> Camera views {sourceCameras.length}
+          </button>
+        ) : null}
         <button type="button" onClick={resetCamera} title="Reset camera">
           <RotateCcw size={16} /> Reset
         </button>
@@ -307,10 +511,79 @@ export function SplatViewer({
           ) : (
             <Cpu size={13} />
           )}
-          <span>Full detail · {shortGpuName(gpuRenderer)}</span>
+          <span>
+            All splats · {shortGpuName(gpuRenderer)} ·{" "}
+            {framesPerSecond > 0 ? `${Math.round(framesPerSecond)} FPS` : "…"}
+          </span>
+          <small>
+            {renderScale === 1
+              ? "Native pixels · no LOD"
+              : `${Math.round(renderScale * 100)}% motion buffer · native when still`}
+          </small>
           {isIntegratedRenderer(gpuRenderer) ? (
             <strong>Use the RTX 4080 for smooth navigation</strong>
           ) : null}
+        </div>
+      ) : null}
+      {sourceCameras.length > 1 ? (
+        <div className="viewer-camera-panel">
+          <header>
+            <span>Camera map</span>
+            <strong>{sourceCameras.length} calibrated</strong>
+          </header>
+          <CameraMap
+            cameras={sourceCameras}
+            currentPosition={cameraPosition}
+            selectedSourceIndex={selectedSourceIndex}
+            onCameraSelect={focusSourceCamera}
+          />
+          <small>Arrow = current view · triangles = source cameras</small>
+          {showSourceViews ? (
+            <div className="viewer-camera-bookmarks">
+              {sourceCameras.map((pose) => (
+                <button
+                  type="button"
+                  key={pose.evidenceId}
+                  aria-pressed={pose.sourceIndex === selectedSourceIndex}
+                  title={`${Math.round(pose.confidenceScore * 100)}% camera calibration`}
+                  onClick={() => focusSourceCamera(pose)}
+                >
+                  View {pose.sourceIndex + 1}
+                </button>
+              ))}
+            </div>
+          ) : null}
+        </div>
+      ) : null}
+      {captureCoverage?.outside ? (
+        <div className="viewer-coverage-warning" role="status">
+          <TriangleAlert size={14} />
+          <span>
+            Outside measured capture coverage. Unseen surfaces may open into
+            holes.
+          </span>
+          <button type="button" onClick={resetCamera}>
+            Return to source view
+          </button>
+        </div>
+      ) : null}
+      {detectorEnabled ? (
+        <div
+          className={`viewer-detector-status ${detectorError ? "viewer-detector-error" : ""}`}
+        >
+          <strong>
+            {detectorError
+              ? "Detector unavailable"
+              : detectorStatus
+                ? `${detectorStatus.model} · ${detections.length} view boxes`
+                : "Starting local detector…"}
+          </strong>
+          <span>
+            {detectorError ??
+              (detectorStatus
+                ? `${detectorStatus.provider} · ${Math.round(detectorStatus.inferenceMs)} ms · 2D observations, not verified hazards`
+                : "Analyzing the rendered view locally")}
+          </span>
         </div>
       ) : null}
       <div className="viewer-navigation" aria-label="Rescue View movement">
@@ -379,9 +652,159 @@ export function SplatViewer({
         <strong>
           {artifact.gaussianCount?.toLocaleString() ?? "—"} Gaussians
         </strong>
+        {artifact.geometry?.backend === "vggt_sharp_joint" ? (
+          <em>VGGT cameras + LucidFrame SHARP</em>
+        ) : null}
+        {crossViewSupportedRatio !== undefined ? (
+          <em title="Gaussians whose depth agrees with at least one other measured source view">
+            {Math.round(crossViewSupportedRatio * 100)}% cross-view supported
+          </em>
+        ) : null}
       </div>
     </div>
   );
+}
+
+function placeAtSourceCamera(engine: Engine, pose: ReconstructionCameraPose) {
+  engine.controls.dispose();
+  engine.camera.position.set(...pose.position);
+  const [w, x, y, z] = pose.rotationWxyz;
+  const sourceRotation = new engine.THREE.Quaternion(x, y, z, w).normalize();
+  engine.camera.quaternion
+    .copy(sourceRotation)
+    .multiply(engine.initialQuaternion);
+  engine.controls = createNavigationControls(
+    engine.camera,
+    engine.renderer.domElement,
+    engine.THREE,
+  );
+  engine.renderer.domElement.focus({ preventScroll: true });
+}
+
+function CameraMap({
+  cameras,
+  currentPosition,
+  selectedSourceIndex,
+  onCameraSelect,
+}: {
+  cameras: ReconstructionCameraPose[];
+  currentPosition: [number, number, number];
+  selectedSourceIndex: number;
+  onCameraSelect: (camera: ReconstructionCameraPose) => void;
+}) {
+  const points = [...cameras.map((camera) => camera.position), currentPosition];
+  const minX = Math.min(...points.map((point) => point[0]));
+  const maxX = Math.max(...points.map((point) => point[0]));
+  const minZ = Math.min(...points.map((point) => point[2]));
+  const maxZ = Math.max(...points.map((point) => point[2]));
+  const spanX = Math.max(0.5, maxX - minX);
+  const spanZ = Math.max(0.5, maxZ - minZ);
+  const project = (position: [number, number, number]) =>
+    [
+      10 + ((position[0] - minX) / spanX) * 140,
+      86 - ((position[2] - minZ) / spanZ) * 76,
+    ] as const;
+  const current = project(currentPosition);
+  return (
+    <svg
+      className="viewer-camera-map"
+      viewBox="0 0 160 96"
+      role="img"
+      aria-label="Top-down map of calibrated source cameras and current viewer position"
+    >
+      <path d="M10 86H150M10 48H150M10 10H150" />
+      <path d="M10 10V86M80 10V86M150 10V86" />
+      {cameras.map((camera) => {
+        const [x, y] = project(camera.position);
+        const [directionX, directionY] = cameraDirection2d(
+          camera.rotationWxyz,
+        );
+        const tipX = x + directionX * 7;
+        const tipY = y + directionY * 7;
+        const backX = x - directionX * 4;
+        const backY = y - directionY * 4;
+        const sideX = -directionY * 4;
+        const sideY = directionX * 4;
+        return (
+          <g
+            key={camera.evidenceId}
+            role="button"
+            tabIndex={0}
+            aria-label={`Jump to calibrated source view ${camera.sourceIndex + 1}`}
+            onClick={() => onCameraSelect(camera)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter" || event.key === " ") {
+                event.preventDefault();
+                onCameraSelect(camera);
+              }
+            }}
+          >
+            <polygon
+              className={
+                camera.sourceIndex === selectedSourceIndex
+                  ? "viewer-selected-camera"
+                  : undefined
+              }
+              points={`${tipX},${tipY} ${backX + sideX},${backY + sideY} ${backX - sideX},${backY - sideY}`}
+            />
+            <text x={x} y={y + 2}>
+              {camera.sourceIndex + 1}
+            </text>
+          </g>
+        );
+      })}
+      <path
+        className="viewer-current-position"
+        d={`M${current[0]},${current[1] - 5} L${current[0] + 4},${current[1] + 4} L${current[0]},${current[1] + 2} L${current[0] - 4},${current[1] + 4} Z`}
+      />
+    </svg>
+  );
+}
+
+function cameraDirection2d(rotationWxyz: [number, number, number, number]) {
+  const [w, x, y, z] = rotationWxyz;
+  // Rotate the OpenCV camera's local +Z forward vector by the solved camera
+  // quaternion, then project it into this top-down X/Z capture layout.
+  const forwardX = 2 * (x * z + w * y);
+  const forwardZ = 1 - 2 * (x * x + y * y);
+  const length = Math.hypot(forwardX, forwardZ) || 1;
+  return [forwardX / length, -forwardZ / length] as const;
+}
+
+function captureCoverageStatus(
+  cameras: ReconstructionCameraPose[],
+  currentPosition: [number, number, number],
+) {
+  if (cameras.length < 2) return undefined;
+  const distances = cameras.map((camera) =>
+    distance3(camera.position, currentPosition),
+  );
+  const nearestCameraSpacing = cameras.map((camera, index) =>
+    Math.min(
+      ...cameras
+        .filter((_, candidateIndex) => candidateIndex !== index)
+        .map((candidate) => distance3(camera.position, candidate.position)),
+    ),
+  );
+  const sortedSpacing = nearestCameraSpacing
+    .filter(Number.isFinite)
+    .sort((left, right) => left - right);
+  const medianSpacing =
+    sortedSpacing[Math.floor(sortedSpacing.length / 2)] ?? 0;
+  const measuredRadius = Math.max(2, medianSpacing * 3);
+  const nearestDistance = Math.min(...distances);
+  return {
+    outside: nearestDistance > measuredRadius,
+    nearestDistance,
+    measuredRadius,
+  };
+}
+
+function distance3(
+  left: [number, number, number],
+  right: [number, number, number],
+) {
+  return Math.hypot(left[0] - right[0], left[1] - right[1], left[2] - right[2]);
 }
 
 function isIntegratedRenderer(renderer: string) {
@@ -532,7 +955,12 @@ function createNavigationControls(
       camera.position.y -= verticalDistance;
       camera.position.z +=
         forwardDistance * Math.cos(yaw) - rightDistance * Math.sin(yaw);
-      return hasContinuousInput || hasNudge || velocity.lengthSq() > 0.000001;
+      return (
+        dragging ||
+        hasContinuousInput ||
+        hasNudge ||
+        velocity.lengthSq() > 0.000001
+      );
     },
     setMovement: (action, active) => {
       if (active) movement.add(action);
@@ -598,9 +1026,12 @@ function resizeRenderer(
   renderer: import("three").WebGLRenderer,
   camera: import("three").PerspectiveCamera,
   sceneMode: "image" | "panorama",
+  renderScale: number,
 ) {
   const canvas = renderer.domElement;
-  const pixelRatio = Math.min(window.devicePixelRatio || 1, 1.75);
+  // Keep every Gaussian resident and sorted. Only the pixel buffer adapts
+  // during motion, then returns to native DPR when the camera settles.
+  const pixelRatio = (window.devicePixelRatio || 1) * renderScale;
   const width = Math.max(1, Math.round(canvas.clientWidth));
   const height = Math.max(1, Math.round(canvas.clientHeight));
   if (
@@ -641,10 +1072,9 @@ async function disposeEngine(engine: Engine): Promise<void> {
     await new Promise((resolve) => window.setTimeout(resolve, 16));
   }
   try {
-    engine.spark.dispose();
     engine.splat.dispose();
+    engine.spark.dispose();
   } finally {
     engine.renderer.dispose();
-    engine.renderer.forceContextLoss();
   }
 }
